@@ -109,6 +109,7 @@ describe('kmlToCourse', () => {
 		expect((result as CourseFromKml).notes).toBe('Line 1\nLine 2\nLine 3');
 	});
 
+
 	it('parses KML coordinates (lon,lat) correctly', () => {
 		const kml = `
 <Folder>
