@@ -183,6 +183,16 @@ export default {
       return result;
     }
 
+    // POST /api/courses/submit — single KML submit (e.g. from Google Earth)
+    if (path === '/api/courses/submit' && request.method === 'POST') {
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) {
+        return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      }
+      const result = await handleSubmitKml(request, env);
+      return result;
+    }
+
     return new Response('Not found', { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
@@ -422,10 +432,64 @@ async function handleImportZip(request: Request, env: Env, athleteId: string): P
   );
 }
 
+function nextCourseId(indexJson: Array<{ id: string }>): string {
+  const nums = indexJson
+    .map((e) => parseInt(e.id, 10))
+    .filter((n) => !Number.isNaN(n));
+  const max = nums.length > 0 ? Math.max(...nums) : 0;
+  return String(max + 1);
+}
+
+async function handleSubmitKml(request: Request, env: Env): Promise<Response> {
+  const contentType = request.headers.get('Content-Type') ?? '';
+  if (!contentType.includes('multipart/form-data')) {
+    return jsonResponse({ error: 'Expected multipart/form-data' }, 400, true);
+  }
+
+  let formData: FormData;
+  try {
+    formData = await request.formData();
+  } catch {
+    return jsonResponse({ error: 'Failed to parse form data' }, 400, true);
+  }
+
+  const file = formData.get('file');
+  if (!(file instanceof Blob)) {
+    return jsonResponse({ error: 'Missing file field' }, 400, true);
+  }
+  const kmlText = await file.text();
+  const nameOverride = formData.get('name');
+  const name = typeof nameOverride === 'string' ? nameOverride.trim() : null;
+
+  const indexRes = await fetch(`${COURSES_BASE}/courses/index.json`);
+  const indexJson = indexRes.ok ? ((await indexRes.json()) as Array<{ id: string }>) : [];
+  const courseId = nextCourseId(indexJson);
+
+  const course = kmlToCourse(kmlText, courseId);
+  if (!course) {
+    return jsonResponse(
+      { error: 'KML must contain at least 2 polygons (start, waypoints, finish)' },
+      400,
+      true
+    );
+  }
+
+  course.submitted_by = 'submitted via web form';
+  if (name) course.name = name;
+
+  const prUrl = await openCoursePR(env, course, kmlText, 'web');
+  if (!prUrl) {
+    return jsonResponse({ error: 'Failed to create pull request' }, 500, true);
+  }
+
+  return jsonResponse({ prUrl }, 200, true);
+}
+
 async function openCoursePR(
   env: Env,
   courseJson: { id: string; [k: string]: unknown },
-  kmlContent: string
+  kmlContent: string,
+  source: 'rowsandall' | 'web' = 'rowsandall'
 ): Promise<string | null> {
   const token = env.GITHUB_TOKEN;
   if (!token) return null;
@@ -436,6 +500,15 @@ async function openCoursePR(
 
   const id = String(courseJson.id);
   const branchName = `import-course-${id}-${Date.now()}`;
+  const courseName = courseJson.name ?? id;
+  const title =
+    source === 'web'
+      ? `Add course ${id} from web submission`
+      : `Import course ${id} from Rowsandall`;
+  const body =
+    source === 'web'
+      ? `Submitted via rownative.icu. Course: ${courseName}`
+      : `Migrated from Rowsandall export. Course: ${courseName}`;
 
   const headers: Record<string, string> = {
     Authorization: `Bearer ${token}`,
@@ -493,10 +566,10 @@ async function openCoursePR(
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      title: `Import course ${id} from Rowsandall`,
+      title,
       head: branchName,
       base: 'main',
-      body: `Migrated from Rowsandall export. Course: ${courseJson.name ?? id}`,
+      body,
     }),
   });
   if (!prRes.ok) return null;
