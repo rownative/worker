@@ -92,6 +92,7 @@ export default {
     // OAuth login — redirect to intervals.icu (with state for CSRF protection)
     if (path === '/oauth/authorize') {
       const state = crypto.randomUUID();
+      console.log(`[oauth] authorize: generated state=${state}`);
       const params = new URLSearchParams({
         client_id: env.INTERVALS_CLIENT_ID,
         redirect_uri: 'https://rownative.icu/oauth/callback',
@@ -117,8 +118,13 @@ export default {
       const cookieHeader = request.headers.get('Cookie') ?? '';
       const stateMatch = cookieHeader.match(/rn_oauth_state=([^;]+)/);
       const storedState = stateMatch ? stateMatch[1].trim() : null;
+      console.log(`[oauth] callback: code present=${!!code}, state from URL=${state}`);
+      console.log(`[oauth] callback: cookie header present=${cookieHeader.length > 0}, stored state=${storedState}`);
+      console.log(`[oauth] callback: state match=${!!state && !!storedState && state === storedState}`);
       if (!code || !state || !storedState || state !== storedState) {
-        return new Response(!code ? 'Missing code' : 'Invalid state', { status: 400 });
+        const reason = !code ? 'Missing code' : 'Invalid state';
+        console.log(`[oauth] callback: validation failed — ${reason}`);
+        return new Response(reason, { status: 400 });
       }
 
       // Exchange code for tokens
@@ -307,13 +313,19 @@ async function encryptSession(session: Session, secret: string): Promise<string>
   const combined = new Uint8Array(iv.byteLength + ciphertext.byteLength);
   combined.set(iv, 0);
   combined.set(new Uint8Array(ciphertext), iv.byteLength);
-  return btoa(String.fromCharCode(...combined));
+  // Use URL-safe base64 (no +, /, or = padding) to avoid cookie-encoding pitfalls
+  return btoa(String.fromCharCode(...combined))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 }
 
 async function decryptSession(cookie: string, secret: string): Promise<Session | null> {
   try {
     const key = await getAesKey(secret);
-    const combined = Uint8Array.from(atob(cookie), c => c.charCodeAt(0));
+    // Accept both URL-safe base64 (new) and standard base64 (legacy sessions)
+    const normalized = cookie.replace(/-/g, '+').replace(/_/g, '/');
+    // Restore stripped padding: base64 requires length to be a multiple of 4
+    const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4);
+    const combined = Uint8Array.from(atob(padded), c => c.charCodeAt(0));
     const iv = combined.slice(0, 12);
     const ciphertext = combined.slice(12);
     const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
