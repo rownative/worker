@@ -89,7 +89,7 @@ if (path === '/oauth/authorize') {
     client_id: env.INTERVALS_CLIENT_ID,
     redirect_uri: 'https://rownative.icu/oauth/callback',
     response_type: 'code',
-    scope: 'PROFILE_READ,ACTIVITY_READ',
+    scope: 'PROFILE_READ ACTIVITY_READ',
   });
   return Response.redirect(`https://intervals.icu/oauth/authorize?${params}`, 302);
 }
