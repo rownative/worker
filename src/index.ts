@@ -9,6 +9,12 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    // #region agent log
+    if (path.startsWith('/api/courses/submit')) {
+      fetch('http://127.0.0.1:7691/ingest/770bd333-f0c6-4569-b816-3db8bb63447a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'52b113'},body:JSON.stringify({sessionId:'52b113',location:'index.ts:10',message:'Submit path received',data:{path,method:request.method,fullUrl:request.url},timestamp:Date.now(),hypothesisId:'C'})}).catch(()=>{});
+    }
+    // #endregion
+
     // Course index
     if (path === '/api/courses/' || path === '/api/courses') {
       return fetchFromGitHub(`${COURSES_BASE}/courses/index.json`, 'application/json');
@@ -184,7 +190,7 @@ export default {
     }
 
     // POST /api/courses/submit — single KML submit (e.g. from Google Earth)
-    if (path === '/api/courses/submit' && request.method === 'POST') {
+    if ((path === '/api/courses/submit' || path === '/api/courses/submit/') && request.method === 'POST') {
       const athleteId = await getAthleteIdFromRequest(request, env);
       if (!athleteId) {
         return jsonResponse({ error: 'Unauthorised' }, 401, true);
@@ -193,6 +199,11 @@ export default {
       return result;
     }
 
+    // #region agent log
+    if (path.includes('submit')) {
+      fetch('http://127.0.0.1:7691/ingest/770bd333-f0c6-4569-b816-3db8bb63447a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'52b113'},body:JSON.stringify({sessionId:'52b113',location:'index.ts:204',message:'404 fallback for submit path',data:{path,method:request.method},timestamp:Date.now(),hypothesisId:'D'})}).catch(()=>{});
+    }
+    // #endregion
     return new Response('Not found', { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
