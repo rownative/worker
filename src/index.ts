@@ -194,6 +194,16 @@ export default {
       return result;
     }
 
+    // POST /api/courses/update — KML revision for existing provisional course
+    if ((path === '/api/courses/update' || path === '/api/courses/update/') && request.method === 'POST') {
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) {
+        return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      }
+      const result = await handleUpdateKml(request, env);
+      return result;
+    }
+
     return new Response('Not found', { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
@@ -493,6 +503,42 @@ async function courseFileExistsOnMain(env: Env, id: string): Promise<boolean> {
   return res.ok;
 }
 
+/** Fetch courses/{id}.json from main; returns { sha, content } or null if not found. */
+async function getCourseFileOnMain(
+  env: Env,
+  id: string
+): Promise<{ sha: string; content: Record<string, unknown> } | null> {
+  const token = env.GITHUB_TOKEN;
+  const repo = env.GITHUB_REPO ?? 'rownative/courses';
+  const [owner, repoName] = repo.split('/');
+  if (!owner || !repoName || !token) return null;
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'User-Agent': 'rownative-worker',
+  };
+
+  const res = await fetch(
+    `https://api.github.com/repos/${owner}/${repoName}/contents/courses/${id}.json?ref=main`,
+    { headers }
+  );
+  if (!res.ok) return null;
+
+  const meta = (await res.json()) as { sha?: string; content?: string; encoding?: string };
+  const sha = meta.sha;
+  const content = meta.content;
+  if (!sha || !content || meta.encoding !== 'base64') return null;
+
+  try {
+    const json = JSON.parse(atob(content)) as Record<string, unknown>;
+    return { sha, content: json };
+  } catch {
+    return null;
+  }
+}
+
 /** Get next course ID, skipping any that already exist on main (handles stale index). */
 async function getNextAvailableCourseId(env: Env): Promise<string> {
   let indexJson = await fetchCourseIndex(env);
@@ -567,6 +613,78 @@ async function handleSubmitKml(request: Request, env: Env): Promise<Response> {
     return jsonResponse({ error: friendly }, 500, true);
   }
 
+  return jsonResponse({ prUrl: result.prUrl }, 200, true);
+}
+
+async function handleUpdateKml(request: Request, env: Env): Promise<Response> {
+  const contentType = request.headers.get('Content-Type') ?? '';
+  if (!contentType.includes('multipart/form-data')) {
+    return jsonResponse({ error: 'Expected multipart/form-data' }, 400, true);
+  }
+
+  let formData: FormData;
+  try {
+    formData = await request.formData();
+  } catch {
+    return jsonResponse({ error: 'Failed to parse form data' }, 400, true);
+  }
+
+  const idRaw = formData.get('id');
+  const id = typeof idRaw === 'string' ? idRaw.trim() : '';
+  if (!id) {
+    return jsonResponse({ error: 'Course ID is required' }, 400, true);
+  }
+
+  const file = formData.get('file');
+  if (!(file instanceof Blob)) {
+    return jsonResponse({ error: 'Missing KML file' }, 400, true);
+  }
+  const kmlText = await file.text();
+  const nameOverride = formData.get('name');
+  const name = typeof nameOverride === 'string' ? nameOverride.trim() : null;
+
+  const existing = await getCourseFileOnMain(env, id);
+  if (!existing) {
+    return jsonResponse({ error: 'Course not found' }, 404, true);
+  }
+  const existingStatus = (existing.content.status as string) ?? '';
+  if (existingStatus !== 'provisional') {
+    return jsonResponse(
+      {
+        error:
+          'Only provisional courses can be updated via this form. Established courses must be edited directly in the repository.',
+      },
+      400,
+      true
+    );
+  }
+
+  const fromKml = kmlToCourse(kmlText, id);
+  if (!fromKml) {
+    return jsonResponse(
+      { error: 'KML must contain at least 2 polygons (start, waypoints, finish)' },
+      400,
+      true
+    );
+  }
+
+  const merged: Record<string, unknown> = {
+    id,
+    name: name ?? fromKml.name,
+    country: existing.content.country,
+    status: existing.content.status,
+    notes: fromKml.notes,
+    polygons: fromKml.polygons,
+    center_lat: fromKml.center_lat,
+    center_lon: fromKml.center_lon,
+    distance_m: fromKml.distance_m,
+    submitted_by: 'revision via web form',
+  };
+
+  const result = await openCourseUpdatePR(env, merged, existing.sha);
+  if (!result.ok) {
+    return jsonResponse({ error: result.error }, 500, true);
+  }
   return jsonResponse({ prUrl: result.prUrl }, 200, true);
 }
 
@@ -671,6 +789,91 @@ async function openCoursePR(
       head: branchName,
       base: 'main',
       body,
+    }),
+  });
+  if (!prRes.ok) return { ok: false, error: await ghError(prRes) };
+  const pr = (await prRes.json()) as { html_url?: string };
+  const prUrl = pr.html_url ?? null;
+  return prUrl ? { ok: true, prUrl } : { ok: false, error: 'GitHub did not return PR URL' };
+}
+
+/** Open PR to update existing course JSON (provisional only). Does not PUT KML — deploy regenerates it. */
+async function openCourseUpdatePR(
+  env: Env,
+  courseJson: Record<string, unknown>,
+  jsonSha: string
+): Promise<OpenCoursePRResult> {
+  const token = env.GITHUB_TOKEN;
+  if (!token) return { ok: false, error: 'GitHub token not configured (GITHUB_TOKEN secret)' };
+
+  const repo = env.GITHUB_REPO ?? 'rownative/courses';
+  const [owner, repoName] = repo.split('/');
+  if (!owner || !repoName) return { ok: false, error: 'Invalid GITHUB_REPO format' };
+
+  const id = String(courseJson.id);
+  const branchName = `update-course-${id}-${Date.now()}`;
+  const courseName = (courseJson.name as string) ?? id;
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'User-Agent': 'rownative-worker',
+  };
+
+  async function ghError(res: Response): Promise<string> {
+    const text = await res.text();
+    let msg: string;
+    try {
+      const j = JSON.parse(text) as { message?: string };
+      msg = j.message ?? text;
+    } catch {
+      msg = text || res.statusText;
+    }
+    return `GitHub API (${res.status}): ${msg}`;
+  }
+
+  const mainRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/git/ref/heads/main`, {
+    headers,
+  });
+  if (!mainRes.ok) return { ok: false, error: await ghError(mainRes) };
+
+  const mainRef = (await mainRes.json()) as { object: { sha: string } };
+  const mainSha = mainRef.object.sha;
+
+  const createBranchRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/git/refs`, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ref: `refs/heads/${branchName}`, sha: mainSha }),
+  });
+  if (!createBranchRes.ok) return { ok: false, error: await ghError(createBranchRes) };
+
+  const courseJsonStr = JSON.stringify(courseJson, null, 2);
+  const courseB64 = btoa(String.fromCharCode(...new TextEncoder().encode(courseJsonStr)));
+
+  const putJson = await fetch(
+    `https://api.github.com/repos/${owner}/${repoName}/contents/courses/${id}.json`,
+    {
+      method: 'PUT',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: `Update course ${id} from KML revision`,
+        content: courseB64,
+        sha: jsonSha,
+        branch: branchName,
+      }),
+    }
+  );
+  if (!putJson.ok) return { ok: false, error: await ghError(putJson) };
+
+  const prRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/pulls`, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: `Update course ${id} from KML revision`,
+      head: branchName,
+      base: 'main',
+      body: `Revised geometry via rownative.icu. Course: ${courseName}`,
     }),
   });
   if (!prRes.ok) return { ok: false, error: await ghError(prRes) };
