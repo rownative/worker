@@ -5,6 +5,11 @@ export default defineWorkersConfig({
 		poolOptions: {
 			workers: {
 				wrangler: { configPath: './wrangler.jsonc' },
+				miniflare: {
+					vars: {
+						GITHUB_REPO: 'rownative/courses',
+					},
+				},
 			},
 		},
 	},
