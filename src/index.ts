@@ -120,10 +120,13 @@ if (path === '/oauth/callback') {
 
   // Fetch athlete ID
   const profileRes = await fetch('https://intervals.icu/api/v1/athlete/self', {
-    headers: { 'Authorization': `Bearer ${tokens.access_token}` },
-  });
-  if (!profileRes.ok) return new Response('Profile fetch failed', { status: 500 });
-  const profile = await profileRes.json() as { id: string };
+  headers: { 'Authorization': `Bearer ${tokens.access_token}` },
+});
+if (!profileRes.ok) {
+  const body = await profileRes.text();
+  return new Response(`Profile fetch failed: ${profileRes.status} ${body}`, { status: 500 });
+}
+const profile = await profileRes.json() as { id: string };
 
   // Encrypt session and set cookie
   const expiresAt = Date.now() + tokens.expires_in * 1000;
