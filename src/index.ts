@@ -386,7 +386,7 @@ async function handleImportZip(request: Request, env: Env, athleteId: string): P
   const ownedIds = extractIds(manifest.owned);
   const likedIds = extractIds(manifest.liked);
 
-  const indexJson = await fetchCourseIndex();
+  const indexJson = await fetchCourseIndex(env);
   const existingIds = new Set(indexJson.map((e) => e.id));
 
   let alreadyInLibrary = 0;
@@ -440,13 +440,75 @@ function nextCourseId(indexJson: Array<{ id: string }>): string {
   return String(max + 1);
 }
 
-/** Fetch index with cache-busting to avoid stale CDN when checking for next course ID. */
-async function fetchCourseIndex(): Promise<Array<{ id: string }>> {
-  const url = `${COURSES_BASE}/courses/index.json?nocache=${Date.now()}`;
-  const res = await fetch(url);
+/** Fetch index via GitHub API (less cached than raw) to avoid stale data when assigning next course ID. */
+async function fetchCourseIndex(env: Env): Promise<Array<{ id: string }>> {
+  const token = env.GITHUB_TOKEN;
+  const repo = env.GITHUB_REPO ?? 'rownative/courses';
+  const [owner, repoName] = repo.split('/');
+  if (!owner || !repoName) return [];
+
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'User-Agent': 'rownative-worker',
+  };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  const res = await fetch(
+    `https://api.github.com/repos/${owner}/${repoName}/contents/courses/index.json?ref=main`,
+    { headers }
+  );
   if (!res.ok) return [];
-  const data = (await res.json()) as Array<{ id: string }>;
-  return Array.isArray(data) ? data : [];
+
+  const meta = (await res.json()) as { content?: string; encoding?: string };
+  const content = meta.content;
+  if (!content || meta.encoding !== 'base64') return [];
+
+  try {
+    const json = JSON.parse(atob(content)) as unknown;
+    return Array.isArray(json) ? json : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Check if courses/{id}.json exists on main (avoids 422 by pre-checking before PUT). */
+async function courseFileExistsOnMain(env: Env, id: string): Promise<boolean> {
+  const token = env.GITHUB_TOKEN;
+  const repo = env.GITHUB_REPO ?? 'rownative/courses';
+  const [owner, repoName] = repo.split('/');
+  if (!owner || !repoName || !token) return false;
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'User-Agent': 'rownative-worker',
+  };
+
+  const res = await fetch(
+    `https://api.github.com/repos/${owner}/${repoName}/contents/courses/${id}.json?ref=main`,
+    { headers }
+  );
+  return res.ok;
+}
+
+/** Get next course ID, skipping any that already exist on main (handles stale index). */
+async function getNextAvailableCourseId(env: Env): Promise<string> {
+  let indexJson = await fetchCourseIndex(env);
+  let courseId = nextCourseId(indexJson);
+  let attempts = 0;
+  const maxAttempts = 5;
+  while (await courseFileExistsOnMain(env, courseId) && attempts < maxAttempts) {
+    indexJson = await fetchCourseIndex(env);
+    const nums = indexJson
+      .map((e) => parseInt(e.id, 10))
+      .filter((n) => !Number.isNaN(n));
+    const max = nums.length > 0 ? Math.max(...nums) : 0;
+    courseId = String(Math.max(max + 1, parseInt(courseId, 10) + 1));
+    attempts++;
+  }
+  return courseId;
 }
 
 async function handleSubmitKml(request: Request, env: Env): Promise<Response> {
@@ -470,8 +532,7 @@ async function handleSubmitKml(request: Request, env: Env): Promise<Response> {
   const nameOverride = formData.get('name');
   const name = typeof nameOverride === 'string' ? nameOverride.trim() : null;
 
-  let indexJson = await fetchCourseIndex();
-  let courseId = nextCourseId(indexJson);
+  let courseId = await getNextAvailableCourseId(env);
   let course = kmlToCourse(kmlText, courseId);
   if (!course) {
     return jsonResponse(
@@ -486,10 +547,9 @@ async function handleSubmitKml(request: Request, env: Env): Promise<Response> {
 
   let result = await openCoursePR(env, course, kmlText, 'web');
 
-  // Retry once if 422 "sha" — file already exists (stale index or race)
+  // Retry once if 422 "sha" — file already exists (race or pre-check missed)
   if (!result.ok && /422|sha/i.test(result.error ?? '')) {
-    indexJson = await fetchCourseIndex();
-    courseId = nextCourseId(indexJson);
+    courseId = await getNextAvailableCourseId(env);
     course = kmlToCourse(kmlText, courseId);
     if (course) {
       course.submitted_by = 'submitted via web form';
@@ -502,7 +562,7 @@ async function handleSubmitKml(request: Request, env: Env): Promise<Response> {
     const err = result.error ?? 'Failed to create pull request';
     const friendly =
       /422|sha/i.test(err)
-        ? 'This course may already exist on the site. Please try again in a few minutes.'
+        ? 'A course with this ID already exists (the index may have been temporarily stale). Please try again in a minute.'
         : err;
     return jsonResponse({ error: friendly }, 500, true);
   }
