@@ -386,8 +386,7 @@ async function handleImportZip(request: Request, env: Env, athleteId: string): P
   const ownedIds = extractIds(manifest.owned);
   const likedIds = extractIds(manifest.liked);
 
-  const indexRes = await fetch(`${COURSES_BASE}/courses/index.json`);
-  const indexJson = indexRes.ok ? ((await indexRes.json()) as Array<{ id: string }>) : [];
+  const indexJson = await fetchCourseIndex();
   const existingIds = new Set(indexJson.map((e) => e.id));
 
   let alreadyInLibrary = 0;
@@ -441,6 +440,15 @@ function nextCourseId(indexJson: Array<{ id: string }>): string {
   return String(max + 1);
 }
 
+/** Fetch index with cache-busting to avoid stale CDN when checking for next course ID. */
+async function fetchCourseIndex(): Promise<Array<{ id: string }>> {
+  const url = `${COURSES_BASE}/courses/index.json?nocache=${Date.now()}`;
+  const res = await fetch(url);
+  if (!res.ok) return [];
+  const data = (await res.json()) as Array<{ id: string }>;
+  return Array.isArray(data) ? data : [];
+}
+
 async function handleSubmitKml(request: Request, env: Env): Promise<Response> {
   const contentType = request.headers.get('Content-Type') ?? '';
   if (!contentType.includes('multipart/form-data')) {
@@ -462,11 +470,9 @@ async function handleSubmitKml(request: Request, env: Env): Promise<Response> {
   const nameOverride = formData.get('name');
   const name = typeof nameOverride === 'string' ? nameOverride.trim() : null;
 
-  const indexRes = await fetch(`${COURSES_BASE}/courses/index.json`);
-  const indexJson = indexRes.ok ? ((await indexRes.json()) as Array<{ id: string }>) : [];
-  const courseId = nextCourseId(indexJson);
-
-  const course = kmlToCourse(kmlText, courseId);
+  let indexJson = await fetchCourseIndex();
+  let courseId = nextCourseId(indexJson);
+  let course = kmlToCourse(kmlText, courseId);
   if (!course) {
     return jsonResponse(
       { error: 'KML must contain at least 2 polygons (start, waypoints, finish)' },
@@ -478,13 +484,27 @@ async function handleSubmitKml(request: Request, env: Env): Promise<Response> {
   course.submitted_by = 'submitted via web form';
   if (name) course.name = name;
 
-  const result = await openCoursePR(env, course, kmlText, 'web');
+  let result = await openCoursePR(env, course, kmlText, 'web');
+
+  // Retry once if 422 "sha" — file already exists (stale index or race)
+  if (!result.ok && /422|sha/i.test(result.error ?? '')) {
+    indexJson = await fetchCourseIndex();
+    courseId = nextCourseId(indexJson);
+    course = kmlToCourse(kmlText, courseId);
+    if (course) {
+      course.submitted_by = 'submitted via web form';
+      if (name) course.name = name;
+      result = await openCoursePR(env, course, kmlText, 'web');
+    }
+  }
+
   if (!result.ok) {
-    return jsonResponse(
-      { error: result.error ?? 'Failed to create pull request' },
-      500,
-      true
-    );
+    const err = result.error ?? 'Failed to create pull request';
+    const friendly =
+      /422|sha/i.test(err)
+        ? 'This course may already exist on the site. Please try again in a few minutes.'
+        : err;
+    return jsonResponse({ error: friendly }, 500, true);
   }
 
   return jsonResponse({ prUrl: result.prUrl }, 200, true);
