@@ -8,6 +8,9 @@ export default defineWorkersConfig({
 				miniflare: {
 					vars: {
 						GITHUB_REPO: 'rownative/courses',
+						INTERVALS_CLIENT_ID: 'test-client-id',
+						INTERVALS_CLIENT_SECRET: 'test-client-secret',
+						TOKEN_ENCRYPTION_KEY: 'test-encryption-key-32-chars!!xx',
 					},
 				},
 			},
