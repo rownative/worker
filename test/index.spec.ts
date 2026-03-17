@@ -92,11 +92,27 @@ describe('Rowing Courses Worker', () => {
 		});
 
 		it('GET /oauth/callback with missing state cookie returns 400 Invalid state', async () => {
+			// state "test-state" was never stored (no prior authorize) — invalid
 			const response = await fetchAndWait(
 				'https://rownative.icu/oauth/callback?code=test-code&state=test-state',
 			);
 			expect(response.status).toBe(400);
 			expect(await response.text()).toBe('Invalid state');
+		});
+
+		it('GET /oauth/callback with no cookie but state in KV (iOS fallback) passes validation', async () => {
+			// Simulate iOS: authorize stores state in KV; callback has no cookie but state in URL
+			const authRes = await fetchAndWait('https://rownative.icu/oauth/authorize');
+			const location = authRes.headers.get('Location') ?? '';
+			const urlState = new URL(location).searchParams.get('state');
+			expect(urlState).toBeTruthy();
+			// Callback without cookie — KV fallback should allow state validation to pass
+			const response = await fetchAndWait(
+				`https://rownative.icu/oauth/callback?code=fake-code&state=${urlState}`,
+			);
+			// State validation passes; token exchange fails (fake code) → 500, not 400 Invalid state
+			expect(response.status).toBe(500);
+			expect(await response.text()).toContain('Token exchange failed');
 		});
 
 		it('GET /oauth/callback with mismatched state returns 400 Invalid state', async () => {

@@ -16,13 +16,13 @@ Authentication with [intervals.icu](https://intervals.icu) uses the standard OAu
 
 ### State Parameter (CSRF Protection)
 
-A random UUID is generated on each `/oauth/authorize` request and stored in a short-lived, `HttpOnly` cookie (`rn_oauth_state`, 10-minute `Max-Age`). The same value is forwarded to intervals.icu as the `state` query parameter. On callback, the worker compares the `state` value in the redirect URL against the cookie; a mismatch returns `400 Invalid state`.
+A random UUID is generated on each `/oauth/authorize` request and stored in two places: (1) a short-lived, `HttpOnly` cookie (`rn_oauth_state`, 10-minute `Max-Age`), and (2) KV with a 10-minute TTL. The same value is forwarded to intervals.icu as the `state` query parameter. On callback, the worker verifies state from the cookie (primary) or, if the cookie is absent (e.g. iOS ephemeral ASWebAuthenticationSession), from KV. A mismatch returns `400 Invalid state`.
 
 ### iOS / Native App Pitfalls
 
 | Symptom | Likely Cause | Fix |
 |---|---|---|
-| `400 Invalid state` on callback | The OAuth state cookie is absent from the callback request | Ensure the auth session (e.g. `ASWebAuthenticationSession`) is **not** configured as ephemeral — cookies must persist across the authorize → callback redirect |
+| `400 Invalid state` on callback | The OAuth state cookie is absent and state was not found in KV | State is stored in KV on authorize — if still failing, ensure the authorize and callback requests hit the same worker (same zone/deployment) |
 | Decryption failure after login | Session cookie was URL-decoded before reaching the worker | Session cookies are now stored as URL-safe base64 (no `+`, `/`, or `=`) so they survive URL-decoding intact |
 
 ### Session Cookie

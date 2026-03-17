@@ -92,7 +92,10 @@ export function kmlToCourse(kmlText: string, courseId: string): CourseFromKml | 
   }
   const inner = container?.[1] ?? kmlText;
 
-  const name = extractTag(inner, 'name') || 'Imported course';
+  // Container name only — content before first Placemark (avoids picking up Placemark names)
+  const firstPm = inner.search(/<Placemark\b/i);
+  const containerContent = firstPm >= 0 ? inner.slice(0, firstPm) : inner;
+  const name = extractTag(containerContent, 'name') || 'Imported course';
   const description = extractTag(inner, 'description') || '';
 
   // Find all Placemarks
