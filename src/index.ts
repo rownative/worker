@@ -1,6 +1,7 @@
 import { unzipSync } from 'fflate';
 import { kmlToCourse } from './kml-to-course';
 
+// Rowing courses API
 const COURSES_BASE = 'https://raw.githubusercontent.com/rownative/courses/main';
 const GITHUB_API = 'https://api.github.com';
 
