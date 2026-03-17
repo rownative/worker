@@ -35,6 +35,9 @@
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
 	 * Note: Use secrets to store sensitive data.
 	 * https://developers.cloudflare.com/workers/configuration/secrets/
+	 *
+	 * Required for import-zip: GITHUB_TOKEN (set via `wrangler secret put GITHUB_TOKEN`).
+	 * Optional: GITHUB_REPO (default: rownative/courses).
 	 */
 	// "vars": {  "MY_VARIABLE": "production_value" }
 	/**
