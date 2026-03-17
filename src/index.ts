@@ -83,21 +83,37 @@ export default {
       });
     }
 
-    // OAuth login — redirect to intervals.icu
+    // OAuth login — redirect to intervals.icu (with state for CSRF protection)
     if (path === '/oauth/authorize') {
+      const state = crypto.randomUUID();
       const params = new URLSearchParams({
         client_id: env.INTERVALS_CLIENT_ID,
         redirect_uri: 'https://rownative.icu/oauth/callback',
         response_type: 'code',
         scope: 'ACTIVITY:READ',
+        state,
       });
-      return Response.redirect(`https://intervals.icu/oauth/authorize?${params}`, 302);
+      return new Response(null, {
+        status: 302,
+        headers: {
+          'Location': `https://intervals.icu/oauth/authorize?${params}`,
+          'Set-Cookie': `rn_oauth_state=${state}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600`,
+        },
+      });
     }
 
     // OAuth callback — exchange code for tokens
     if (path === '/oauth/callback') {
       const code = url.searchParams.get('code');
-      if (!code) return new Response('Missing code', { status: 400 });
+      const state = url.searchParams.get('state');
+
+      // Verify state (CSRF protection)
+      const cookieHeader = request.headers.get('Cookie') ?? '';
+      const stateMatch = cookieHeader.match(/rn_oauth_state=([^;]+)/);
+      const storedState = stateMatch ? stateMatch[1].trim() : null;
+      if (!code || !state || !storedState || state !== storedState) {
+        return new Response(!code ? 'Missing code' : 'Invalid state', { status: 400 });
+      }
 
       // Exchange code for tokens
       const tokenRes = await fetch('https://intervals.icu/api/oauth/token', {
@@ -134,14 +150,11 @@ export default {
         expiresAt: 0, // no expiry
       };
       const cookie = await encryptSession(session, env.TOKEN_ENCRYPTION_KEY);
+      const headers = new Headers({ 'Location': '/' });
+      headers.append('Set-Cookie', `rn_session=${cookie}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=7776000`);
+      headers.append('Set-Cookie', 'rn_oauth_state=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0');
 
-      return new Response(null, {
-        status: 302,
-        headers: {
-          'Location': '/',
-          'Set-Cookie': `rn_session=${cookie}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=7776000`,
-        },
-      });
+      return new Response(null, { status: 302, headers });
     }
 
     // OAuth logout
