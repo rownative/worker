@@ -36,8 +36,8 @@ export default {
       return fetchFromGitHub(kmlPath, 'application/vnd.google-earth.kml+xml');
     }
 
-    // Follow / unfollow
-    const followMatch = path.match(/^\/rowers\/courses\/(\d+)\/(follow|unfollow)\/?$/);
+    // Follow / unfollow — /api/rowers/courses/{id}/follow|unfollow
+    const followMatch = path.match(/^\/api\/rowers\/courses\/(\d+)\/(follow|unfollow)\/?$/);
     if (followMatch && request.method === 'POST') {
       const id = followMatch[1];
       const action = followMatch[2];
@@ -54,12 +54,13 @@ export default {
       });
     }
 
-    // GET /api/me
+    // GET /api/me — 200 with null when unauthenticated (avoids console noise)
     if (path === '/api/me' || path === '/api/me/') {
       const athleteId = await getAthleteIdFromRequest(request, env);
-      if (!athleteId) return new Response('Unauthorised', { status: 401 });
-      const liked: string[] = JSON.parse((await env.ROWING_COURSES.get(`liked:${athleteId}`)) ?? '[]');
-      return new Response(JSON.stringify({ athleteId, liked }), {
+      const payload = athleteId
+        ? { athleteId, liked: JSON.parse((await env.ROWING_COURSES.get(`liked:${athleteId}`)) ?? '[]') }
+        : { athleteId: null, liked: [] };
+      return new Response(JSON.stringify(payload), {
         headers: {
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': 'https://rownative.icu',
