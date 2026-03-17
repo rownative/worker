@@ -1,4 +1,8 @@
+import { unzipSync } from 'fflate';
+import { kmlToCourse } from './kml-to-course';
+
 const COURSES_BASE = 'https://raw.githubusercontent.com/rownative/courses/main';
+const GITHUB_API = 'https://api.github.com';
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -169,6 +173,16 @@ export default {
       });
     }
 
+    // POST /api/courses/import-zip — Rowsandall ZIP import
+    if (path === '/api/courses/import-zip' && request.method === 'POST') {
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) {
+        return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      }
+      const result = await handleImportZip(request, env, athleteId);
+      return result;
+    }
+
     return new Response('Not found', { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
@@ -293,4 +307,199 @@ async function getAesKey(secret: string): Promise<CryptoKey> {
   const padded = new Uint8Array(32);
   padded.set(raw);
   return crypto.subtle.importKey('raw', padded, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+}
+
+// ── Import ZIP ─────────────────────────────────────────────────────────────────
+
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': 'https://rownative.icu',
+  'Access-Control-Allow-Credentials': 'true',
+};
+
+function jsonResponse(body: object, status: number, withCors = false): Response {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (withCors) Object.assign(headers, CORS_HEADERS);
+  return new Response(JSON.stringify(body), { status, headers });
+}
+
+interface Manifest {
+  version?: number;
+  exported_at?: string;
+  owned?: Array<{ id: string; name?: string } | string>;
+  liked?: Array<{ id: string; name?: string } | string>;
+}
+
+function extractIds(arr: Array<{ id: string; name?: string } | string> | undefined): string[] {
+  if (!Array.isArray(arr)) return [];
+  return arr.map((o) => (typeof o === 'object' && o != null && 'id' in o ? o.id : String(o)));
+}
+
+async function handleImportZip(request: Request, env: Env, athleteId: string): Promise<Response> {
+  const contentType = request.headers.get('Content-Type') ?? '';
+  if (!contentType.includes('multipart/form-data')) {
+    return jsonResponse({ error: 'Expected multipart/form-data' }, 400, true);
+  }
+
+  let formData: FormData;
+  try {
+    formData = await request.formData();
+  } catch {
+    return jsonResponse({ error: 'Failed to parse form data' }, 400, true);
+  }
+
+  const file = formData.get('file');
+  if (!(file instanceof Blob)) {
+    return jsonResponse({ error: 'Missing file field' }, 400, true);
+  }
+  const zipBytes = new Uint8Array(await file.arrayBuffer());
+
+  let zipContents: Record<string, Uint8Array>;
+  try {
+    zipContents = unzipSync(zipBytes);
+  } catch {
+    return jsonResponse({ error: 'Invalid ZIP file' }, 400, true);
+  }
+
+  const manifestBytes = zipContents['manifest.json'];
+  if (!manifestBytes) {
+    return jsonResponse({ error: 'Missing manifest.json' }, 400, true);
+  }
+
+  let manifest: Manifest;
+  try {
+    manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as Manifest;
+  } catch {
+    return jsonResponse({ error: 'Invalid manifest.json' }, 400, true);
+  }
+
+  const ownedIds = extractIds(manifest.owned);
+  const likedIds = extractIds(manifest.liked);
+
+  const indexRes = await fetch(`${COURSES_BASE}/courses/index.json`);
+  const indexJson = indexRes.ok ? ((await indexRes.json()) as Array<{ id: string }>) : [];
+  const existingIds = new Set(indexJson.map((e) => e.id));
+
+  let alreadyInLibrary = 0;
+  let prsOpened = 0;
+  const prUrls: string[] = [];
+
+  for (const id of ownedIds) {
+    if (existingIds.has(id)) {
+      alreadyInLibrary++;
+      continue;
+    }
+    const kmlEntry = Object.entries(zipContents).find(([name]) => {
+      const base = name.replace(/^.*\//, '').replace(/\.kml$/i, '');
+      return base === id || name.endsWith(`_${id}.kml`);
+    });
+    if (!kmlEntry) continue;
+    const [kmlPath, kmlBytes] = kmlEntry;
+    const kmlText = new TextDecoder().decode(kmlBytes);
+    const course = kmlToCourse(kmlText, id);
+    if (!course) continue;
+
+    const prUrl = await openCoursePR(env, course, kmlText);
+    if (prUrl) {
+      prsOpened++;
+      prUrls.push(prUrl);
+    }
+  }
+
+  const kvKey = `liked:${athleteId}`;
+  const currentLiked: string[] = JSON.parse((await env.ROWING_COURSES.get(kvKey)) ?? '[]');
+  const updatedLiked = [...new Set([...currentLiked, ...likedIds])];
+  await env.ROWING_COURSES.put(kvKey, JSON.stringify(updatedLiked));
+
+  return jsonResponse(
+    {
+      alreadyInLibrary,
+      prsOpened,
+      prUrls,
+      likedRestored: likedIds.length,
+    },
+    200,
+    true
+  );
+}
+
+async function openCoursePR(
+  env: Env,
+  courseJson: { id: string; [k: string]: unknown },
+  kmlContent: string
+): Promise<string | null> {
+  const token = env.GITHUB_TOKEN;
+  if (!token) return null;
+
+  const repo = env.GITHUB_REPO ?? 'rownative/courses';
+  const [owner, repoName] = repo.split('/');
+  if (!owner || !repoName) return null;
+
+  const id = String(courseJson.id);
+  const branchName = `import-course-${id}-${Date.now()}`;
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
+
+  const mainRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/git/ref/heads/main`, {
+    headers,
+  });
+  if (!mainRes.ok) return null;
+  const mainRef = (await mainRes.json()) as { object: { sha: string } };
+  const mainSha = mainRef.object.sha;
+
+  const createBranchRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/git/refs`, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ref: `refs/heads/${branchName}`, sha: mainSha }),
+  });
+  if (!createBranchRes.ok) return null;
+
+  const courseJsonStr = JSON.stringify(courseJson, null, 2);
+  const courseB64 = btoa(String.fromCharCode(...new TextEncoder().encode(courseJsonStr)));
+  const kmlB64 = btoa(String.fromCharCode(...new TextEncoder().encode(kmlContent)));
+
+  const putJson = await fetch(
+    `https://api.github.com/repos/${owner}/${repoName}/contents/courses/${id}.json`,
+    {
+      method: 'PUT',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: `Add course ${id} from Rowsandall import`,
+        content: courseB64,
+        branch: branchName,
+      }),
+    }
+  );
+  if (!putJson.ok) return null;
+
+  const putKml = await fetch(
+    `https://api.github.com/repos/${owner}/${repoName}/contents/kml/${id}.kml`,
+    {
+      method: 'PUT',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: `Add KML for course ${id}`,
+        content: kmlB64,
+        branch: branchName,
+      }),
+    }
+  );
+  if (!putKml.ok) return null;
+
+  const prRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/pulls`, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: `Import course ${id} from Rowsandall`,
+      head: branchName,
+      base: 'main',
+      body: `Migrated from Rowsandall export. Course: ${courseJson.name ?? id}`,
+    }),
+  });
+  if (!prRes.ok) return null;
+  const pr = (await prRes.json()) as { html_url?: string };
+  return pr.html_url ?? null;
 }
