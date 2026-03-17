@@ -83,6 +83,73 @@ export default {
       });
     }
 
+    // OAuth login — redirect to intervals.icu
+if (path === '/oauth/authorize') {
+  const params = new URLSearchParams({
+    client_id: env.INTERVALS_CLIENT_ID,
+    redirect_uri: 'https://rownative.icu/oauth/callback',
+    response_type: 'code',
+    scope: 'PROFILE_READ,ACTIVITY_READ',
+  });
+  return Response.redirect(`https://intervals.icu/oauth/authorize?${params}`, 302);
+}
+
+// OAuth callback — exchange code for tokens
+if (path === '/oauth/callback') {
+  const code = url.searchParams.get('code');
+  if (!code) return new Response('Missing code', { status: 400 });
+
+  // Exchange code for tokens
+  const tokenRes = await fetch('https://intervals.icu/oauth/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: env.INTERVALS_CLIENT_ID,
+      client_secret: env.INTERVALS_CLIENT_SECRET,
+      code,
+      grant_type: 'authorization_code',
+      redirect_uri: 'https://rownative.icu/oauth/callback',
+    }),
+  });
+  if (!tokenRes.ok) return new Response('Token exchange failed', { status: 500 });
+  const tokens = await tokenRes.json() as {
+    access_token: string;
+    refresh_token: string;
+    expires_in: number;
+  };
+
+  // Fetch athlete ID
+  const profileRes = await fetch('https://intervals.icu/api/v1/athlete/self', {
+    headers: { 'Authorization': `Bearer ${tokens.access_token}` },
+  });
+  if (!profileRes.ok) return new Response('Profile fetch failed', { status: 500 });
+  const profile = await profileRes.json() as { id: string };
+
+  // Encrypt session and set cookie
+  const expiresAt = Date.now() + tokens.expires_in * 1000;
+  const session = { athleteId: profile.id, accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expiresAt };
+  const cookie = await encryptSession(session, env.TOKEN_ENCRYPTION_KEY);
+
+  return new Response(null, {
+    status: 302,
+    headers: {
+      'Location': '/',
+      'Set-Cookie': `rn_session=${cookie}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=7776000`,
+    },
+  });
+}
+
+// OAuth logout
+if (path === '/oauth/logout') {
+  return new Response(null, {
+    status: 302,
+    headers: {
+      'Location': '/',
+      'Set-Cookie': 'rn_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0',
+    },
+  });
+}
+
     return new Response('Not found', { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
@@ -140,9 +207,45 @@ async function getAthleteIdFromRequest(request: Request, env: Env): Promise<stri
     if (mac !== expectedMac) return null;
     return athleteId;
   }
-  // Cookie auth (browser) — placeholder until OAuth is implemented
-  return null;
+
+  // Cookie auth (browser)
+  const cookieHeader = request.headers.get('Cookie') ?? '';
+  const match = cookieHeader.match(/rn_session=([^;]+)/);
+  if (!match) return null;
+  const session = await decryptSession(match[1], env.TOKEN_ENCRYPTION_KEY);
+  if (!session) return null;
+
+  // Refresh token if expired
+  if (Date.now() > session.expiresAt) {
+    const refreshed = await refreshSession(session, env);
+    if (!refreshed) return null;
+    return refreshed.athleteId;
+  }
+
+  return session.athleteId;
 }
+
+async function refreshSession(session: Session, env: Env): Promise<Session | null> {
+  const res = await fetch('https://intervals.icu/oauth/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: env.INTERVALS_CLIENT_ID,
+      client_secret: env.INTERVALS_CLIENT_SECRET,
+      refresh_token: session.refreshToken,
+      grant_type: 'refresh_token',
+    }),
+  });
+  if (!res.ok) return null;
+  const tokens = await res.json() as { access_token: string; refresh_token: string; expires_in: number };
+  return {
+    athleteId: session.athleteId,
+    accessToken: tokens.access_token,
+    refreshToken: tokens.refresh_token,
+    expiresAt: Date.now() + tokens.expires_in * 1000,
+  };
+}
+
 
 async function apiKeyForAthlete(athleteId: string, secret: string): Promise<string> {
   const key = await crypto.subtle.importKey(
@@ -162,4 +265,42 @@ async function verifyIntervalsToken(bearerToken: string): Promise<string | null>
   if (!res.ok) return null;
   const data = await res.json() as { id: string };
   return data.id ?? null;
+}
+
+interface Session {
+  athleteId: string;
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
+}
+
+async function encryptSession(session: Session, secret: string): Promise<string> {
+  const key = await getAesKey(secret);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encoded = new TextEncoder().encode(JSON.stringify(session));
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded);
+  const combined = new Uint8Array(iv.byteLength + ciphertext.byteLength);
+  combined.set(iv, 0);
+  combined.set(new Uint8Array(ciphertext), iv.byteLength);
+  return btoa(String.fromCharCode(...combined));
+}
+
+async function decryptSession(cookie: string, secret: string): Promise<Session | null> {
+  try {
+    const key = await getAesKey(secret);
+    const combined = Uint8Array.from(atob(cookie), c => c.charCodeAt(0));
+    const iv = combined.slice(0, 12);
+    const ciphertext = combined.slice(12);
+    const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+    return JSON.parse(new TextDecoder().decode(plaintext)) as Session;
+  } catch {
+    return null;
+  }
+}
+
+async function getAesKey(secret: string): Promise<CryptoKey> {
+  const raw = new TextEncoder().encode(secret).slice(0, 32);
+  const padded = new Uint8Array(32);
+  padded.set(raw);
+  return crypto.subtle.importKey('raw', padded, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
 }
