@@ -1,6 +1,7 @@
 import { unzipSync } from 'fflate';
 import { kmlToCourse } from './kml-to-course';
 
+// Rowing courses API
 const COURSES_BASE = 'https://raw.githubusercontent.com/rownative/courses/main';
 const GITHUB_API = 'https://api.github.com';
 
@@ -8,12 +9,6 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
-
-    // #region agent log
-    if (path.startsWith('/api/courses/submit')) {
-      fetch('http://127.0.0.1:7691/ingest/770bd333-f0c6-4569-b816-3db8bb63447a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'52b113'},body:JSON.stringify({sessionId:'52b113',location:'index.ts:10',message:'Submit path received',data:{path,method:request.method,fullUrl:request.url},timestamp:Date.now(),hypothesisId:'C'})}).catch(()=>{});
-    }
-    // #endregion
 
     // Course index
     if (path === '/api/courses/' || path === '/api/courses') {
@@ -199,11 +194,6 @@ export default {
       return result;
     }
 
-    // #region agent log
-    if (path.includes('submit')) {
-      fetch('http://127.0.0.1:7691/ingest/770bd333-f0c6-4569-b816-3db8bb63447a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'52b113'},body:JSON.stringify({sessionId:'52b113',location:'index.ts:204',message:'404 fallback for submit path',data:{path,method:request.method},timestamp:Date.now(),hypothesisId:'D'})}).catch(()=>{});
-    }
-    // #endregion
     return new Response('Not found', { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
@@ -419,10 +409,10 @@ async function handleImportZip(request: Request, env: Env, athleteId: string): P
     const course = kmlToCourse(kmlText, id);
     if (!course) continue;
 
-    const prUrl = await openCoursePR(env, course, kmlText);
-    if (prUrl) {
+    const prResult = await openCoursePR(env, course, kmlText);
+    if (prResult.ok) {
       prsOpened++;
-      prUrls.push(prUrl);
+      prUrls.push(prResult.prUrl);
     }
   }
 
@@ -488,26 +478,32 @@ async function handleSubmitKml(request: Request, env: Env): Promise<Response> {
   course.submitted_by = 'submitted via web form';
   if (name) course.name = name;
 
-  const prUrl = await openCoursePR(env, course, kmlText, 'web');
-  if (!prUrl) {
-    return jsonResponse({ error: 'Failed to create pull request' }, 500, true);
+  const result = await openCoursePR(env, course, kmlText, 'web');
+  if (!result.ok) {
+    return jsonResponse(
+      { error: result.error ?? 'Failed to create pull request' },
+      500,
+      true
+    );
   }
 
-  return jsonResponse({ prUrl }, 200, true);
+  return jsonResponse({ prUrl: result.prUrl }, 200, true);
 }
+
+type OpenCoursePRResult = { ok: true; prUrl: string } | { ok: false; error: string };
 
 async function openCoursePR(
   env: Env,
   courseJson: { id: string; [k: string]: unknown },
   kmlContent: string,
   source: 'rowsandall' | 'web' = 'rowsandall'
-): Promise<string | null> {
+): Promise<OpenCoursePRResult> {
   const token = env.GITHUB_TOKEN;
-  if (!token) return null;
+  if (!token) return { ok: false, error: 'GitHub token not configured (GITHUB_TOKEN secret)' };
 
   const repo = env.GITHUB_REPO ?? 'rownative/courses';
   const [owner, repoName] = repo.split('/');
-  if (!owner || !repoName) return null;
+  if (!owner || !repoName) return { ok: false, error: 'Invalid GITHUB_REPO format' };
 
   const id = String(courseJson.id);
   const branchName = `import-course-${id}-${Date.now()}`;
@@ -527,10 +523,23 @@ async function openCoursePR(
     'X-GitHub-Api-Version': '2022-11-28',
   };
 
+  async function ghError(res: Response): Promise<string> {
+    const text = await res.text();
+    let msg: string;
+    try {
+      const j = JSON.parse(text) as { message?: string };
+      msg = j.message ?? text;
+    } catch {
+      msg = text || res.statusText;
+    }
+    return `GitHub API (${res.status}): ${msg}`;
+  }
+
   const mainRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/git/ref/heads/main`, {
     headers,
   });
-  if (!mainRes.ok) return null;
+  if (!mainRes.ok) return { ok: false, error: await ghError(mainRes) };
+
   const mainRef = (await mainRes.json()) as { object: { sha: string } };
   const mainSha = mainRef.object.sha;
 
@@ -539,7 +548,7 @@ async function openCoursePR(
     headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({ ref: `refs/heads/${branchName}`, sha: mainSha }),
   });
-  if (!createBranchRes.ok) return null;
+  if (!createBranchRes.ok) return { ok: false, error: await ghError(createBranchRes) };
 
   const courseJsonStr = JSON.stringify(courseJson, null, 2);
   const courseB64 = btoa(String.fromCharCode(...new TextEncoder().encode(courseJsonStr)));
@@ -557,7 +566,7 @@ async function openCoursePR(
       }),
     }
   );
-  if (!putJson.ok) return null;
+  if (!putJson.ok) return { ok: false, error: await ghError(putJson) };
 
   const putKml = await fetch(
     `https://api.github.com/repos/${owner}/${repoName}/contents/kml/${id}.kml`,
@@ -571,7 +580,7 @@ async function openCoursePR(
       }),
     }
   );
-  if (!putKml.ok) return null;
+  if (!putKml.ok) return { ok: false, error: await ghError(putKml) };
 
   const prRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/pulls`, {
     method: 'POST',
@@ -583,7 +592,8 @@ async function openCoursePR(
       body,
     }),
   });
-  if (!prRes.ok) return null;
+  if (!prRes.ok) return { ok: false, error: await ghError(prRes) };
   const pr = (await prRes.json()) as { html_url?: string };
-  return pr.html_url ?? null;
+  const prUrl = pr.html_url ?? null;
+  return prUrl ? { ok: true, prUrl } : { ok: false, error: 'GitHub did not return PR URL' };
 }
