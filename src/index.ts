@@ -84,74 +84,76 @@ export default {
     }
 
     // OAuth login — redirect to intervals.icu
-if (path === '/oauth/authorize') {
-  const params = new URLSearchParams({
-    client_id: env.INTERVALS_CLIENT_ID,
-    redirect_uri: 'https://rownative.icu/oauth/callback',
-    response_type: 'code',
-    scope: 'ACTIVITY:READ',
-  });
-  return Response.redirect(`https://intervals.icu/oauth/authorize?${params}`, 302);
-}
+    if (path === '/oauth/authorize') {
+      const params = new URLSearchParams({
+        client_id: env.INTERVALS_CLIENT_ID,
+        redirect_uri: 'https://rownative.icu/oauth/callback',
+        response_type: 'code',
+        scope: 'ACTIVITY:READ',
+      });
+      return Response.redirect(`https://intervals.icu/oauth/authorize?${params}`, 302);
+    }
 
-// OAuth callback — exchange code for tokens
-if (path === '/oauth/callback') {
-  const code = url.searchParams.get('code');
-  if (!code) return new Response('Missing code', { status: 400 });
+    // OAuth callback — exchange code for tokens
+    if (path === '/oauth/callback') {
+      const code = url.searchParams.get('code');
+      if (!code) return new Response('Missing code', { status: 400 });
 
-  // Exchange code for tokens
-  const tokenRes = await fetch('https://intervals.icu/api/oauth/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: env.INTERVALS_CLIENT_ID,
-      client_secret: env.INTERVALS_CLIENT_SECRET,
-      code,
-      grant_type: 'authorization_code',
-      redirect_uri: 'https://rownative.icu/oauth/callback',
-    }),
-  });
-  if (!tokenRes.ok) return new Response('Token exchange failed', { status: 500 });
-  const tokens = await tokenRes.json() as {
-    access_token: string;
-    refresh_token: string;
-    expires_in: number;
-  };
+      // Exchange code for tokens
+      const tokenRes = await fetch('https://intervals.icu/api/oauth/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: env.INTERVALS_CLIENT_ID,
+          client_secret: env.INTERVALS_CLIENT_SECRET,
+          code,
+          grant_type: 'authorization_code',
+          redirect_uri: 'https://rownative.icu/oauth/callback',
+        }),
+      });
+      if (!tokenRes.ok) {
+        const body = await tokenRes.text();
+        return new Response(`Token exchange failed: ${tokenRes.status} ${body}`, { status: 500 });
+      }
 
-  // Fetch athlete ID
-  const profileRes = await fetch('https://intervals.icu/api/v1/athlete/self', {
-  headers: { 'Authorization': `Bearer ${tokens.access_token}` },
-});
-if (!profileRes.ok) {
-  const body = await profileRes.text();
-  return new Response(`Profile fetch failed: ${profileRes.status} ${body}`, { status: 500 });
-}
-const profile = await profileRes.json() as { id: string };
+      // Athlete ID is included in the token response — no separate profile call needed
+      const tokens = await tokenRes.json() as {
+        access_token: string;
+        scope: string;
+        athlete: { id: string; name: string };
+      };
 
-  // Encrypt session and set cookie
-  const expiresAt = Date.now() + tokens.expires_in * 1000;
-  const session = { athleteId: profile.id, accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expiresAt };
-  const cookie = await encryptSession(session, env.TOKEN_ENCRYPTION_KEY);
+      const athleteId = tokens.athlete.id;
 
-  return new Response(null, {
-    status: 302,
-    headers: {
-      'Location': '/',
-      'Set-Cookie': `rn_session=${cookie}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=7776000`,
-    },
-  });
-}
+      // Encrypt session and set cookie
+      // intervals.icu does not use refresh tokens or expiry — store access token only
+      const session: Session = {
+        athleteId,
+        accessToken: tokens.access_token,
+        refreshToken: '',
+        expiresAt: 0, // no expiry
+      };
+      const cookie = await encryptSession(session, env.TOKEN_ENCRYPTION_KEY);
 
-// OAuth logout
-if (path === '/oauth/logout') {
-  return new Response(null, {
-    status: 302,
-    headers: {
-      'Location': '/',
-      'Set-Cookie': 'rn_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0',
-    },
-  });
-}
+      return new Response(null, {
+        status: 302,
+        headers: {
+          'Location': '/',
+          'Set-Cookie': `rn_session=${cookie}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=7776000`,
+        },
+      });
+    }
+
+    // OAuth logout
+    if (path === '/oauth/logout') {
+      return new Response(null, {
+        status: 302,
+        headers: {
+          'Location': '/',
+          'Set-Cookie': 'rn_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0',
+        },
+      });
+    }
 
     return new Response('Not found', { status: 404 });
   },
@@ -218,37 +220,8 @@ async function getAthleteIdFromRequest(request: Request, env: Env): Promise<stri
   const session = await decryptSession(match[1], env.TOKEN_ENCRYPTION_KEY);
   if (!session) return null;
 
-  // Refresh token if expired
-  if (Date.now() > session.expiresAt) {
-    const refreshed = await refreshSession(session, env);
-    if (!refreshed) return null;
-    return refreshed.athleteId;
-  }
-
   return session.athleteId;
 }
-
-async function refreshSession(session: Session, env: Env): Promise<Session | null> {
-  const res = await fetch('https://intervals.icu/oauth/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: env.INTERVALS_CLIENT_ID,
-      client_secret: env.INTERVALS_CLIENT_SECRET,
-      refresh_token: session.refreshToken,
-      grant_type: 'refresh_token',
-    }),
-  });
-  if (!res.ok) return null;
-  const tokens = await res.json() as { access_token: string; refresh_token: string; expires_in: number };
-  return {
-    athleteId: session.athleteId,
-    accessToken: tokens.access_token,
-    refreshToken: tokens.refresh_token,
-    expiresAt: Date.now() + tokens.expires_in * 1000,
-  };
-}
-
 
 async function apiKeyForAthlete(athleteId: string, secret: string): Promise<string> {
   const key = await crypto.subtle.importKey(
