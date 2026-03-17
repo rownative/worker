@@ -100,7 +100,7 @@ if (path === '/oauth/callback') {
   if (!code) return new Response('Missing code', { status: 400 });
 
   // Exchange code for tokens
-  const tokenRes = await fetch('https://intervals.icu/oauth/token', {
+  const tokenRes = await fetch('https://intervals.icu/api/oauth/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
