@@ -59,7 +59,7 @@ function polygonCentroid(points: Array<{ lat: number; lon: number }>): { lat: nu
   return { lat, lon };
 }
 
-function haversine(a: { lat: number; lon: number }, b: { lat: number; lon: number }): number {
+export function haversine(a: { lat: number; lon: number }, b: { lat: number; lon: number }): number {
   const R = 6371000; // m
   const toRad = (d: number) => (d * Math.PI) / 180;
   const dLat = toRad(b.lat - a.lat);

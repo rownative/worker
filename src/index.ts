@@ -1,5 +1,5 @@
 import { unzipSync } from 'fflate';
-import { kmlToCourse } from './kml-to-course';
+import { kmlToCourse, haversine } from './kml-to-course';
 
 // Rowing courses API
 const COURSES_BASE = 'https://raw.githubusercontent.com/rownative/courses/main';
@@ -10,9 +10,36 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // Course index
+    // Course index (optional geo filter: ?lat=&lon=&radius=)
     if (path === '/api/courses/' || path === '/api/courses') {
-      return fetchFromGitHub(`${COURSES_BASE}/courses/index.json`, 'application/json');
+      const latVal = url.searchParams.get('lat');
+      const lonVal = url.searchParams.get('lon');
+      const radiusVal = url.searchParams.get('radius');
+      const lat = latVal != null ? parseFloat(latVal) : NaN;
+      const lon = lonVal != null ? parseFloat(lonVal) : NaN;
+      const radius = radiusVal != null ? parseFloat(radiusVal) : NaN;
+      const hasGeoFilter = !Number.isNaN(lat) && !Number.isNaN(lon) && !Number.isNaN(radius) && radius > 0;
+
+      const res = await fetch(`${COURSES_BASE}/courses/index.json`);
+      if (!res.ok) return new Response('Not found', { status: 404 });
+      const data = (await res.json()) as Array<{ id: string; center_lat?: number; center_lon?: number; [k: string]: unknown }>;
+      const courses = Array.isArray(data) ? data : [];
+
+      const filtered = hasGeoFilter
+        ? courses.filter((c) => {
+            const clat = c.center_lat;
+            const clon = c.center_lon;
+            if (clat == null || clon == null) return false;
+            return haversine({ lat, lon }, { lat: clat, lon: clon }) <= radius;
+          })
+        : courses;
+
+      return new Response(JSON.stringify(filtered), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        },
+      });
     }
 
     // Multi-course KML bundle — must come before single course to avoid prefix match

@@ -53,6 +53,47 @@ describe('Rowing Courses Worker', () => {
 		expect(data).toHaveProperty('liked');
 	});
 
+	describe('GET /api/courses', () => {
+		it('returns full index when no geo params', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/courses');
+			expect(response.status).toBe(200);
+			expect(response.headers.get('Content-Type')).toContain('application/json');
+			const data = await response.json();
+			expect(Array.isArray(data)).toBe(true);
+			expect(data.length).toBeGreaterThan(0);
+			expect(data[0]).toHaveProperty('id');
+			expect(data[0]).toHaveProperty('center_lat');
+			expect(data[0]).toHaveProperty('center_lon');
+		});
+
+		it('returns filtered courses when lat, lon, radius provided', async () => {
+			const response = await fetchAndWait(
+				'https://rownative.icu/api/courses?lat=42&lon=-71&radius=50000',
+			);
+			expect(response.status).toBe(200);
+			expect(response.headers.get('Content-Type')).toContain('application/json');
+			const data = await response.json();
+			expect(Array.isArray(data)).toBe(true);
+			// All returned courses should be within 50 km of (42, -71)
+			const haversine = (a: { lat: number; lon: number }, b: { lat: number; lon: number }) => {
+				const R = 6371000;
+				const toRad = (d: number) => (d * Math.PI) / 180;
+				const dLat = toRad(b.lat - a.lat);
+				const dLon = toRad(b.lon - a.lon);
+				const lat1 = toRad(a.lat);
+				const lat2 = toRad(b.lat);
+				const x = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+				return 2 * R * Math.asin(Math.sqrt(x));
+			};
+			const center = { lat: 42, lon: -71 };
+			for (const c of data) {
+				if (c.center_lat != null && c.center_lon != null) {
+					expect(haversine(center, { lat: c.center_lat, lon: c.center_lon })).toBeLessThanOrEqual(50000);
+				}
+			}
+		});
+	});
+
 	describe('OAuth flow', () => {
 		it('GET /oauth/authorize redirects to intervals.icu with a state cookie', async () => {
 			const response = await fetchAndWait('https://rownative.icu/oauth/authorize');
