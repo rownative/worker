@@ -120,6 +120,8 @@ export default {
     if (path === '/oauth/authorize') {
       const state = crypto.randomUUID();
       console.log(`[oauth] authorize: generated state=${state}`);
+      // Store state in KV for iOS fallback (ASWebAuthenticationSession ephemeral mode doesn't persist cookies)
+      await env.ROWING_COURSES.put(`oauth_state:${state}`, '1', { expirationTtl: 600 });
       const params = new URLSearchParams({
         client_id: env.INTERVALS_CLIENT_ID,
         redirect_uri: 'https://rownative.icu/oauth/callback',
@@ -141,10 +143,14 @@ export default {
       const code = url.searchParams.get('code');
       const state = url.searchParams.get('state');
 
-      // Verify state (CSRF protection)
+      // Verify state (CSRF protection): cookie (primary) or KV (iOS fallback when cookies don't persist)
       const cookieHeader = request.headers.get('Cookie') ?? '';
       const stateMatch = cookieHeader.match(/rn_oauth_state=([^;]+)/);
-      const storedState = stateMatch ? stateMatch[1].trim() : null;
+      let storedState = stateMatch ? stateMatch[1].trim() : null;
+      if (!storedState && state) {
+        const kvState = await env.ROWING_COURSES.get(`oauth_state:${state}`);
+        if (kvState) storedState = state;
+      }
       console.log(`[oauth] callback: code present=${!!code}, state from URL=${state}`);
       console.log(`[oauth] callback: cookie header present=${cookieHeader.length > 0}, stored state=${storedState}`);
       console.log(`[oauth] callback: state match=${!!state && !!storedState && state === storedState}`);
@@ -153,6 +159,8 @@ export default {
         console.log(`[oauth] callback: validation failed — ${reason}`);
         return new Response(reason, { status: 400 });
       }
+      // Consume one-time state (delete from KV if we used it)
+      await env.ROWING_COURSES.delete(`oauth_state:${state}`);
 
       // Exchange code for tokens
       const tokenRes = await fetch('https://intervals.icu/api/oauth/token', {

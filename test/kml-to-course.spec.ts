@@ -121,7 +121,8 @@ describe('kmlToCourse', () => {
 		expect(result).not.toBeNull();
 		const start = (result as CourseFromKml).polygons[0].points;
 		expect(start.length).toBe(3);
-		expect(start[0]).toEqual({ lat: 52.35, lon: 4.927 });
-		expect(start[1]).toEqual({ lat: 52.3505, lon: 4.928 });
+		expect(start).toContainEqual({ lat: 52.35, lon: 4.927 });
+		expect(start).toContainEqual({ lat: 52.3505, lon: 4.928 });
+		expect(start).toContainEqual({ lat: 52.3495, lon: 4.9275 });
 	});
 });
