@@ -1,5 +1,12 @@
 import { unzipSync } from 'fflate';
 import { kmlToCourse, haversine } from './kml-to-course';
+import { calculateCourseTime, type TrackPoint } from './course-time';
+import {
+  fetchIntervalsActivities,
+  fetchIntervalsStreams,
+  isOtwRowing,
+  type IntervalsActivity,
+} from './intervals-api';
 
 // Rowing courses API
 const COURSES_BASE = 'https://raw.githubusercontent.com/rownative/courses/main';
@@ -245,6 +252,42 @@ export default {
       return result;
     }
 
+    // GET /api/me/activities — OTW rowing, last month
+    if ((path === '/api/me/activities' || path === '/api/me/activities/') && request.method === 'GET') {
+      const session = await getSessionFromRequest(request, env);
+      if (!session) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      const result = await handleGetActivities(session, env);
+      return result;
+    }
+
+    // POST /api/courses/{id}/calculate-time
+    const calcMatch = path.match(/^\/api\/courses\/(\d+)\/calculate-time\/?$/);
+    if (calcMatch && request.method === 'POST') {
+      const courseId = calcMatch[1];
+      const session = await getSessionFromRequest(request, env);
+      if (!session) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      const result = await handleCalculateTime(request, courseId, session, env);
+      return result;
+    }
+
+    // POST /api/courses/{id}/course-times — save course time
+    const saveMatch = path.match(/^\/api\/courses\/(\d+)\/course-times\/?$/);
+    if (saveMatch && request.method === 'POST') {
+      const courseId = saveMatch[1];
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      const result = await handleSaveCourseTime(request, courseId, athleteId, env);
+      return result;
+    }
+
+    // GET /api/me/course-times
+    if ((path === '/api/me/course-times' || path === '/api/me/course-times/') && request.method === 'GET') {
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      const result = await handleGetCourseTimes(athleteId, env);
+      return result;
+    }
+
     return new Response('Not found', { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
@@ -289,6 +332,8 @@ async function bundleKml(ids: string[]): Promise<Response> {
 }
 
 async function getAthleteIdFromRequest(request: Request, env: Env): Promise<string | null> {
+  const session = await getSessionFromRequest(request, env);
+  if (session) return session.athleteId;
   // API key auth (CrewNerd)
   const authHeader = request.headers.get('Authorization') ?? '';
   if (authHeader.startsWith('ApiKey ')) {
@@ -302,15 +347,15 @@ async function getAthleteIdFromRequest(request: Request, env: Env): Promise<stri
     if (mac !== expectedMac) return null;
     return athleteId;
   }
+  return null;
+}
 
-  // Cookie auth (browser)
+/** Get session from cookie (browser auth). Returns null for API key. */
+async function getSessionFromRequest(request: Request, env: Env): Promise<Session | null> {
   const cookieHeader = request.headers.get('Cookie') ?? '';
   const match = cookieHeader.match(/rn_session=([^;]+)/);
   if (!match) return null;
-  const session = await decryptSession(match[1], env.TOKEN_ENCRYPTION_KEY);
-  if (!session) return null;
-
-  return session.athleteId;
+  return decryptSession(match[1], env.TOKEN_ENCRYPTION_KEY);
 }
 
 async function apiKeyForAthlete(athleteId: string, secret: string): Promise<string> {
@@ -733,6 +778,159 @@ async function handleUpdateKml(request: Request, env: Env): Promise<Response> {
     return jsonResponse({ error: result.error }, 500, true);
   }
   return jsonResponse({ prUrl: result.prUrl }, 200, true);
+}
+
+// ── Phase 2: Course times ─────────────────────────────────────────────────────
+
+function lastMonthIso(): { oldest: string; newest: string } {
+  const now = new Date();
+  const newest = now.toISOString().slice(0, 10);
+  const past = new Date(now);
+  past.setDate(past.getDate() - 30);
+  const oldest = past.toISOString().slice(0, 10);
+  return { oldest, newest };
+}
+
+async function handleGetActivities(session: Session, env: Env): Promise<Response> {
+  const { oldest, newest } = lastMonthIso();
+  try {
+    const activities = await fetchIntervalsActivities(
+      session.athleteId,
+      session.accessToken,
+      oldest,
+      newest
+    );
+    const otw = activities.filter(isOtwRowing);
+    const out = otw.map((a) => ({
+      id: a.id,
+      name: a.name ?? 'Untitled',
+      start_date_local: a.start_date_local,
+      type: a.type,
+    }));
+    return jsonResponse({ activities: out }, 200, true);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Failed to fetch activities';
+    return jsonResponse({ error: msg }, 502, true);
+  }
+}
+
+async function handleCalculateTime(
+  request: Request,
+  courseId: string,
+  session: Session,
+  env: Env
+): Promise<Response> {
+  let body: { activityId?: string };
+  try {
+    body = (await request.json()) as { activityId?: string };
+  } catch {
+    return jsonResponse({ error: 'Invalid JSON body' }, 400, true);
+  }
+  const activityId = body.activityId;
+  if (!activityId) return jsonResponse({ error: 'activityId required' }, 400, true);
+
+  // Fetch course JSON
+  const courseRes = await fetch(`${COURSES_BASE}/courses/${courseId}.json`);
+  if (!courseRes.ok) return jsonResponse({ error: 'Course not found' }, 404, true);
+  const course = (await courseRes.json()) as { id: string; polygons: unknown[]; distance_m?: number };
+  if (!course.polygons || course.polygons.length < 2) {
+    return jsonResponse({ error: 'Invalid course' }, 400, true);
+  }
+
+  // Fetch streams
+  let streams: { latlng?: [number, number][]; time?: number[] };
+  try {
+    streams = await fetchIntervalsStreams(activityId, session.accessToken);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Failed to fetch activity streams';
+    return jsonResponse({ error: msg }, 502, true);
+  }
+  const latlng = streams.latlng;
+  const time = streams.time;
+  if (!latlng || !time || latlng.length < 2 || time.length < 2) {
+    return jsonResponse({ error: 'Activity has no GPS track' }, 400, true);
+  }
+  const len = Math.min(latlng.length, time.length);
+  const track: TrackPoint[] = [];
+  for (let i = 0; i < len; i++) {
+    const [lat, lon] = latlng[i];
+    track.push({ lat, lon, time: time[i] });
+  }
+
+  const result = calculateCourseTime(
+    course as { id: string; polygons: Array<{ name: string; order: number; points: Array<{ lat: number; lon: number }> }>; distance_m?: number },
+    track,
+    haversine
+  );
+  return jsonResponse(
+    {
+      valid: result.valid,
+      timeS: result.timeS,
+      distanceM: result.distanceM,
+      validationNote: result.validationNote,
+    },
+    200,
+    true
+  );
+}
+
+async function handleSaveCourseTime(
+  request: Request,
+  courseId: string,
+  athleteId: string,
+  env: Env
+): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  let body: { activityId: string; timeS: number; distanceM: number; validationNote?: string };
+  try {
+    body = (await request.json()) as {
+      activityId: string;
+      timeS: number;
+      distanceM: number;
+      validationNote?: string;
+    };
+  } catch {
+    return jsonResponse({ error: 'Invalid JSON body' }, 400, true);
+  }
+  const { activityId, timeS, distanceM, validationNote = '' } = body;
+  if (!activityId || typeof timeS !== 'number' || typeof distanceM !== 'number') {
+    return jsonResponse({ error: 'activityId, timeS, distanceM required' }, 400, true);
+  }
+  const id = crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+  try {
+    await env.DB.prepare(
+      `INSERT INTO course_times (id, athlete_id, activity_id, course_id, time_s, distance_m, validation_note, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(athlete_id, activity_id, course_id) DO UPDATE SET
+         time_s = excluded.time_s,
+         distance_m = excluded.distance_m,
+         validation_note = excluded.validation_note,
+         created_at = excluded.created_at`
+    )
+      .bind(id, athleteId, activityId, courseId, timeS, distanceM, validationNote || '', createdAt)
+      .run();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ error: msg }, 500, true);
+  }
+  return jsonResponse({ saved: true }, 200, true);
+}
+
+async function handleGetCourseTimes(athleteId: string, env: Env): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT id, activity_id, course_id, time_s, distance_m, validation_note, created_at
+       FROM course_times WHERE athlete_id = ? ORDER BY created_at DESC`
+    )
+      .bind(athleteId)
+      .all();
+    return jsonResponse({ courseTimes: results ?? [] }, 200, true);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ error: msg }, 500, true);
+  }
 }
 
 type OpenCoursePRResult = { ok: true; prUrl: string } | { ok: false; error: string };

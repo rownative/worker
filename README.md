@@ -28,6 +28,10 @@ The worker runs on Cloudflare and handles all `/api/*` and `/oauth/*` routes for
 | `/api/courses/submit` | POST | Cookie | Submit new course (multipart, `file`, optional `name`) |
 | `/api/courses/update` | POST | Cookie | Update provisional course (multipart, `id`, `file`, optional `name`) |
 | `/api/auth/crewnerd` | POST | Bearer | Exchange intervals.icu bearer token for API key. Header: `Authorization: Bearer <token>`. Returns `{ api_key }` |
+| `/api/me/activities` | GET | Cookie | OTW rowing activities from last month (for course time calculation) |
+| `/api/courses/{id}/calculate-time` | POST | Cookie | Calculate time on course from activity. Body: `{ activityId }`. Returns `{ valid, timeS, distanceM, validationNote }` |
+| `/api/courses/{id}/course-times` | POST | Cookie | Save course time. Body: `{ activityId, timeS, distanceM, validationNote }` |
+| `/api/me/course-times` | GET | Cookie | List saved course times |
 
 ### Authentication methods
 
@@ -82,7 +86,18 @@ Create a KV namespace and add it to `wrangler.jsonc`:
 
 The worker uses KV for: liked courses per athlete, OAuth state (fallback when cookies don't persist), and session-related data.
 
-### 3. Secrets
+### 3. D1 database (Phase 2a — course times)
+
+For production, create a D1 database and update `database_id` in `wrangler.jsonc`:
+
+```bash
+npx wrangler d1 create rowing-courses-db
+npx wrangler d1 migrations apply rowing-courses-db --remote
+```
+
+Local development uses an ephemeral D1 instance; migrations run automatically.
+
+### 4. Secrets
 
 Set these via `wrangler secret put <NAME>`:
 
