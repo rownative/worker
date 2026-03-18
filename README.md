@@ -12,7 +12,7 @@ The worker runs on Cloudflare and handles all `/api/*` and `/oauth/*` routes for
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
-| `/api/courses` | GET | — | Course index JSON |
+| `/api/courses` | GET | — | Course index JSON. Optional geo filter: `?lat=&lon=&radius=` (all in meters; filters by haversine distance from center) |
 | `/api/courses/kml` | GET | — | KML bundle for course IDs. Query: `?ids=1,2,3` (required) |
 | `/api/courses/{id}` | GET | — | Single course KML. Optional: `?cn=true` for Chinese KML variant |
 | `/api/me` | GET | — | Current user: `{ athleteId, liked }` or `{ athleteId: null, liked: [] }` |
