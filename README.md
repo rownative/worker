@@ -30,8 +30,9 @@ The worker runs on Cloudflare and handles all `/api/*` and `/oauth/*` routes for
 | `/api/auth/crewnerd` | POST | Bearer | Exchange intervals.icu bearer token for API key. Header: `Authorization: Bearer <token>`. Returns `{ api_key }` |
 | `/api/me/activities` | GET | Cookie | OTW rowing activities from last month (for course time calculation) |
 | `/api/courses/{id}/calculate-time` | POST | Cookie | Calculate time on course from activity. Body: `{ activityId }`. Returns `{ valid, timeS, distanceM, validationNote }` |
-| `/api/courses/{id}/course-times` | POST | Cookie | Save course time. Body: `{ activityId, timeS, distanceM, validationNote }` |
-| `/api/me/course-times` | GET | Cookie | List saved course times |
+| `/api/courses/{id}/course-times` | POST | Cookie | Save course time. Body: `{ activityId, timeS, distanceM, validationNote?, workoutDate? }` (workoutDate: YYYY-MM-DD of the workout) |
+| `/api/me/course-times` | GET | Cookie | List saved course times (returns `{ courseTimes }` with `id`, `activity_id`, `course_id`, `time_s`, `distance_m`, `workout_date`, `created_at`, etc.) |
+| `/api/me/course-times/{id}` | DELETE | Cookie | Remove a saved course time by id |
 
 ### Authentication methods
 
