@@ -26,6 +26,10 @@
 			"database_id": "d75bb201-4c38-460f-8d9a-e97e69f5323e",
 			"migrations_dir": "migrations"
 		}
+	],
+	"routes": [
+		{ "pattern": "rownative.icu/api/*", "zone_name": "rownative.icu" },
+		{ "pattern": "rownative.icu/oauth/*", "zone_name": "rownative.icu" }
 	]
 	/**
 	 * Smart Placement
