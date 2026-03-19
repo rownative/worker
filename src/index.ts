@@ -298,6 +298,16 @@ export default {
       return result;
     }
 
+    // DELETE /api/me/course-times/:id
+    const deleteMatch = path.match(/^\/api\/me\/course-times\/([^/]+)\/?$/);
+    if (deleteMatch && request.method === 'DELETE') {
+      const timeId = deleteMatch[1];
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      const result = await handleDeleteCourseTime(timeId, athleteId, env);
+      return result;
+    }
+
     return new Response('Not found', { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
@@ -980,6 +990,22 @@ async function handleGetCourseTimes(athleteId: string, env: Env): Promise<Respon
       }
     }
     return jsonResponse({ courseTimes: results }, 200, true);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ error: msg }, 500, true);
+  }
+}
+
+async function handleDeleteCourseTime(timeId: string, athleteId: string, env: Env): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  try {
+    const r = await env.DB.prepare(
+      'DELETE FROM course_times WHERE id = ? AND athlete_id = ?'
+    )
+      .bind(timeId, athleteId)
+      .run();
+    if (r.meta.changes === 0) return jsonResponse({ error: 'Not found' }, 404, true);
+    return jsonResponse({ deleted: true }, 200, true);
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Database error';
     return jsonResponse({ error: msg }, 500, true);
