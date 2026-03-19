@@ -23,7 +23,7 @@
 		{
 			"binding": "DB",
 			"database_name": "rowing-courses-db",
-			"database_id": "00000000-0000-0000-0000-000000000001",
+			"database_id": "d75bb201-4c38-460f-8d9a-e97e69f5323e",
 			"migrations_dir": "migrations"
 		}
 	]
