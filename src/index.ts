@@ -862,12 +862,18 @@ async function handleCalculateTime(
     track,
     haversine
   );
+  // Downsample latlng for map overlay (max ~600 points)
+  const maxPoints = 600;
+  const step = latlng.length <= maxPoints ? 1 : Math.ceil(latlng.length / maxPoints);
+  const latlngForMap = latlng.filter((_, i) => i % step === 0);
+
   return jsonResponse(
     {
       valid: result.valid,
       timeS: result.timeS,
       distanceM: result.distanceM,
       validationNote: result.validationNote,
+      latlng: latlngForMap,
     },
     200,
     true
