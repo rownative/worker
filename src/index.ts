@@ -956,13 +956,30 @@ async function handleSaveCourseTime(
 async function handleGetCourseTimes(athleteId: string, env: Env): Promise<Response> {
   if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
   try {
-    const { results } = await env.DB.prepare(
-      `SELECT id, activity_id, course_id, time_s, distance_m, validation_note, created_at, workout_date
-       FROM course_times WHERE athlete_id = ? ORDER BY COALESCE(workout_date, created_at) DESC`
-    )
-      .bind(athleteId)
-      .all();
-    return jsonResponse({ courseTimes: results ?? [] }, 200, true);
+    let results: Record<string, unknown>[];
+    try {
+      const r = await env.DB.prepare(
+        `SELECT id, activity_id, course_id, time_s, distance_m, validation_note, created_at, workout_date
+         FROM course_times WHERE athlete_id = ? ORDER BY COALESCE(workout_date, created_at) DESC`
+      )
+        .bind(athleteId)
+        .all();
+      results = r.results ?? [];
+    } catch (colErr) {
+      const errMsg = colErr instanceof Error ? colErr.message : String(colErr);
+      if (errMsg.includes('no such column') && errMsg.includes('workout_date')) {
+        const r = await env.DB.prepare(
+          `SELECT id, activity_id, course_id, time_s, distance_m, validation_note, created_at
+           FROM course_times WHERE athlete_id = ? ORDER BY created_at DESC`
+        )
+          .bind(athleteId)
+          .all();
+        results = r.results ?? [];
+      } else {
+        throw colErr;
+      }
+    }
+    return jsonResponse({ courseTimes: results }, 200, true);
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Database error';
     return jsonResponse({ error: msg }, 500, true);
