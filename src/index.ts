@@ -252,6 +252,16 @@ export default {
       return result;
     }
 
+    // GET /api/me/activities/:activityId/track — GPS track for map overlay
+    const trackMatch = path.match(/^\/api\/me\/activities\/([^/]+)\/track\/?$/);
+    if (trackMatch && request.method === 'GET') {
+      const activityId = trackMatch[1];
+      const session = await getSessionFromRequest(request, env);
+      if (!session) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      const result = await handleGetActivityTrack(activityId, session, env);
+      return result;
+    }
+
     // GET /api/me/activities — OTW rowing, last month
     if ((path === '/api/me/activities' || path === '/api/me/activities/') && request.method === 'GET') {
       const session = await getSessionFromRequest(request, env);
@@ -810,6 +820,23 @@ async function handleGetActivities(session: Session, env: Env): Promise<Response
     return jsonResponse({ activities: out }, 200, true);
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Failed to fetch activities';
+    return jsonResponse({ error: msg }, 502, true);
+  }
+}
+
+async function handleGetActivityTrack(activityId: string, session: Session): Promise<Response> {
+  try {
+    const streams = await fetchIntervalsStreams(activityId, session.accessToken);
+    const latlng = streams.latlng;
+    if (!latlng || latlng.length < 2) {
+      return jsonResponse({ error: 'Activity has no GPS track' }, 400, true);
+    }
+    const maxPoints = 600;
+    const step = latlng.length <= maxPoints ? 1 : Math.ceil(latlng.length / maxPoints);
+    const latlngForMap = latlng.filter((_, i) => i % step === 0);
+    return jsonResponse({ latlng: latlngForMap }, 200, true);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Failed to fetch activity streams';
     return jsonResponse({ error: msg }, 502, true);
   }
 }
