@@ -41,6 +41,65 @@ export async function fetchIntervalsActivities(
 }
 
 /**
+ * Parse intervals.icu streams response into { latlng, time }.
+ * Intervals.icu returns latlng as { data: lat[], data2: lon[] } (separate arrays).
+ * Response may be { latlng: {...}, time: {...} } or [{ type, data, data2 }, ...].
+ */
+function parseStreamsResponse(raw: unknown): IntervalsStreams {
+  const out: IntervalsStreams = {};
+  if (!raw || typeof raw !== 'object') return out;
+
+  // Format: array of stream objects [{ type: "latlng", data: [], data2: [] }, ...]
+  if (Array.isArray(raw)) {
+    for (const s of raw) {
+      if (s && typeof s === 'object' && (s as Record<string, unknown>).type === 'latlng') {
+        const stream = s as { data?: number[]; data2?: number[] };
+        if (Array.isArray(stream.data) && Array.isArray(stream.data2) && stream.data.length >= 2) {
+          const len = Math.min(stream.data.length, stream.data2.length);
+          out.latlng = Array.from({ length: len }, (_, i) => [stream.data![i], stream.data2![i]] as [number, number]);
+          break;
+        }
+      }
+    }
+    for (const s of raw) {
+      if (s && typeof s === 'object' && (s as Record<string, unknown>).type === 'time') {
+        const stream = s as { data?: number[] };
+        if (Array.isArray(stream.data)) {
+          out.time = stream.data;
+          break;
+        }
+      }
+    }
+    return out;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  // Format: { latlng: { data: [...], data2: [...] }, time: { data: [...] } }
+  const latlngStream = obj.latlng as { data?: number[]; data2?: number[] } | undefined;
+  if (latlngStream && typeof latlngStream === 'object') {
+    const data = latlngStream.data;
+    const data2 = latlngStream.data2;
+    if (Array.isArray(data) && Array.isArray(data2) && data.length >= 2) {
+      const len = Math.min(data.length, data2.length);
+      out.latlng = Array.from({ length: len }, (_, i) => [data[i], data2[i]] as [number, number]);
+    }
+  }
+  // Format: latlng already [[lat,lon],...]
+  if (!out.latlng && Array.isArray(obj.latlng) && obj.latlng.length >= 2) {
+    out.latlng = obj.latlng as [number, number][];
+  }
+  // Time stream
+  const timeStream = obj.time as { data?: number[] } | undefined;
+  if (timeStream && typeof timeStream === 'object' && Array.isArray(timeStream.data)) {
+    out.time = timeStream.data;
+  }
+  if (!out.time && Array.isArray(obj.time)) {
+    out.time = obj.time as number[];
+  }
+  return out;
+}
+
+/**
  * Fetch GPS + time streams for an activity.
  */
 export async function fetchIntervalsStreams(
@@ -54,7 +113,8 @@ export async function fetchIntervalsStreams(
   if (!res.ok) {
     throw new Error(`intervals.icu streams: ${res.status} ${await res.text()}`);
   }
-  return (await res.json()) as IntervalsStreams;
+  const raw = await res.json();
+  return parseStreamsResponse(raw);
 }
 
 /** OTW rowing only. Exclude indoor/erg (RowingIndoor, etc). */
