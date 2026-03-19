@@ -183,4 +183,25 @@ describe('Rowing Courses Worker', () => {
 			expect(setCookie).toContain('Max-Age=0');
 		});
 	});
+
+	describe('Phase 2a — Course times', () => {
+		it('GET /api/me/activities returns 401 when not authenticated', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/me/activities');
+			expect(response.status).toBe(401);
+		});
+
+		it('POST /api/courses/66/calculate-time returns 401 when not authenticated', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/courses/66/calculate-time', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ activityId: '123' }),
+			});
+			expect(response.status).toBe(401);
+		});
+
+		it('GET /api/me/course-times returns 401 when not authenticated', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/me/course-times');
+			expect(response.status).toBe(401);
+		});
+	});
 });
