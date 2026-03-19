@@ -914,34 +914,37 @@ async function handleSaveCourseTime(
   env: Env
 ): Promise<Response> {
   if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
-  let body: { activityId: string; timeS: number; distanceM: number; validationNote?: string };
+  let body: { activityId: string; timeS: number; distanceM: number; validationNote?: string; workoutDate?: string };
   try {
     body = (await request.json()) as {
       activityId: string;
       timeS: number;
       distanceM: number;
       validationNote?: string;
+      workoutDate?: string;
     };
   } catch {
     return jsonResponse({ error: 'Invalid JSON body' }, 400, true);
   }
-  const { activityId, timeS, distanceM, validationNote = '' } = body;
+  const { activityId, timeS, distanceM, validationNote = '', workoutDate } = body;
   if (!activityId || typeof timeS !== 'number' || typeof distanceM !== 'number') {
     return jsonResponse({ error: 'activityId, timeS, distanceM required' }, 400, true);
   }
   const id = crypto.randomUUID();
   const createdAt = new Date().toISOString();
+  const wd = workoutDate && /^\d{4}-\d{2}-\d{2}/.test(workoutDate) ? workoutDate.slice(0, 10) : null;
   try {
     await env.DB.prepare(
-      `INSERT INTO course_times (id, athlete_id, activity_id, course_id, time_s, distance_m, validation_note, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO course_times (id, athlete_id, activity_id, course_id, time_s, distance_m, validation_note, created_at, workout_date)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(athlete_id, activity_id, course_id) DO UPDATE SET
          time_s = excluded.time_s,
          distance_m = excluded.distance_m,
          validation_note = excluded.validation_note,
-         created_at = excluded.created_at`
+         created_at = excluded.created_at,
+         workout_date = excluded.workout_date`
     )
-      .bind(id, athleteId, activityId, courseId, timeS, distanceM, validationNote || '', createdAt)
+      .bind(id, athleteId, activityId, courseId, timeS, distanceM, validationNote || '', createdAt, wd)
       .run();
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Database error';
@@ -954,8 +957,8 @@ async function handleGetCourseTimes(athleteId: string, env: Env): Promise<Respon
   if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
   try {
     const { results } = await env.DB.prepare(
-      `SELECT id, activity_id, course_id, time_s, distance_m, validation_note, created_at
-       FROM course_times WHERE athlete_id = ? ORDER BY created_at DESC`
+      `SELECT id, activity_id, course_id, time_s, distance_m, validation_note, created_at, workout_date
+       FROM course_times WHERE athlete_id = ? ORDER BY COALESCE(workout_date, created_at) DESC`
     )
       .bind(athleteId)
       .all();
