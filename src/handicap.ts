@@ -1,7 +1,8 @@
 /**
  * Handicap scoring for challenge results.
- * Lookup standard times by category; compute corrected time and points.
- * Formula: corrected = raw * (standard_ref / standard_athlete), points = 100 * (standard_athlete / raw).
+ * Matches Rowsandall rowing-courses-spec.md / scoring.py:
+ * - corrected_time = raw * (athlete_ref_speed / baseline_ref_speed)
+ * - points = 100 * (2 - reference_speed / velo), velo = course_distance / raw_time
  */
 
 export interface HandicapInput {
@@ -9,6 +10,8 @@ export interface HandicapInput {
   boatType: string;
   sex: string;
   weightClass?: string;
+  /** Challenge course distance (m). Required for points; used for velo. */
+  courseDistanceM?: number;
 }
 
 export interface HandicapResult {
@@ -113,24 +116,33 @@ export async function computeHandicap(
   let standardS: number | null = null;
 
   const builtin = ['hocr', 'fisa', 'charles'];
+  let courseDistanceStd = 500;
   if (builtin.includes(collectionId.toLowerCase())) {
     standardS = lookupBuiltin(collectionId, input.boatType, input.sex, wc);
   } else if (db) {
     const row = await db
       .prepare(
-        'SELECT standard_time_s FROM course_standards WHERE collection_id = ? AND boat_type = ? AND sex = ? AND weight_class = ?'
+        'SELECT standard_time_s, course_distance_m FROM course_standards WHERE collection_id = ? AND boat_type = ? AND sex = ? AND weight_class = ?'
       )
       .bind(collectionId, input.boatType.trim(), input.sex.trim().toUpperCase().slice(0, 1), wc)
       .first();
-    standardS = row ? (row as { standard_time_s: number }).standard_time_s : null;
+    if (row) {
+      const r = row as { standard_time_s: number; course_distance_m?: number };
+      standardS = r.standard_time_s;
+      courseDistanceStd = r.course_distance_m ?? 500;
+    }
     if (standardS == null) {
       const fallback = await db
         .prepare(
-          'SELECT standard_time_s FROM course_standards WHERE collection_id = ? AND boat_type = ? AND sex = ? AND weight_class = ?'
+          'SELECT standard_time_s, course_distance_m FROM course_standards WHERE collection_id = ? AND boat_type = ? AND sex = ? AND weight_class = ?'
         )
         .bind(collectionId, input.boatType.trim(), input.sex.trim().toUpperCase().slice(0, 1), 'HWT')
         .first();
-      standardS = fallback ? (fallback as { standard_time_s: number }).standard_time_s : null;
+      if (fallback) {
+        const f = fallback as { standard_time_s: number; course_distance_m?: number };
+        standardS = f.standard_time_s;
+        courseDistanceStd = f.course_distance_m ?? 500;
+      }
     }
   }
 
@@ -139,9 +151,13 @@ export async function computeHandicap(
   const raw = input.rawTimeS;
   if (raw <= 0) return null;
 
-  const standardRef = 420;
-  const correctedTimeS = raw * (standardRef / standardS);
-  const points = 100 * (standardS / raw);
+  const referenceSpeed = courseDistanceStd / standardS;
+  const baselineRefSpeed = 500 / 420;
+  const correctedTimeS = raw * (referenceSpeed / baselineRefSpeed);
+
+  const courseDistanceM = input.courseDistanceM ?? courseDistanceStd;
+  const velo = courseDistanceM / raw;
+  const points = 100 * (2 - referenceSpeed / velo);
 
   return { correctedTimeS, points };
 }

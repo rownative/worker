@@ -1481,18 +1481,21 @@ async function handleCreateStandardCollection(request: Request, athleteId: strin
     const sexIdx = cols.findIndex((c) => c === 'sex');
     const wcIdx = cols.findIndex((c) => c.includes('weight') || c === 'weightclass');
     const timeIdx = cols.findIndex((c) => c.includes('coursetime') || c.includes('standard') || c === 'time');
+    const distIdx = cols.findIndex((c) => c.includes('coursedistance') || c === 'distance');
     for (let i = 1; i < lines.length; i++) {
       const cells = lines[i].split(/[,\t]/).map((c) => c.trim());
       const boatType = (boatIdx >= 0 ? cells[boatIdx] : '1x') || '1x';
       const sex = (sexIdx >= 0 ? cells[sexIdx] : 'M')?.toUpperCase().slice(0, 1) || 'M';
       const weightClass = (wcIdx >= 0 ? cells[wcIdx] : 'HWT') || 'HWT';
       const timeS = parseStandardTime(timeIdx >= 0 ? cells[timeIdx] : '');
+      const distM = distIdx >= 0 ? parseFloat(cells[distIdx] || '') : NaN;
+      const courseDistanceM = Number.isFinite(distM) && distM > 0 ? distM : 500;
       if (timeS != null && timeS > 0) {
         try {
           await env.DB.prepare(
-            'INSERT OR REPLACE INTO course_standards (collection_id, boat_type, sex, weight_class, standard_time_s) VALUES (?, ?, ?, ?, ?)'
+            'INSERT OR REPLACE INTO course_standards (collection_id, boat_type, sex, weight_class, course_distance_m, standard_time_s) VALUES (?, ?, ?, ?, ?, ?)'
           )
-            .bind(id, boatType, sex, weightClass, timeS)
+            .bind(id, boatType, sex, weightClass, courseDistanceM, timeS)
             .run();
         } catch {
           // skip row on error
@@ -1746,9 +1749,10 @@ async function handleChallengeSubmit(
   let correctedTimeS = result.timeS;
   let points: number | null = null;
   if (collectionId && boatType && sex) {
+    const courseDistanceM = (typeof course.distance_m === 'number' && course.distance_m > 0 ? course.distance_m : result.distanceM) || undefined;
     const handicap = await computeHandicap(
       collectionId,
-      { rawTimeS: result.timeS, boatType, sex, weightClass: weightClass ?? undefined },
+      { rawTimeS: result.timeS, boatType, sex, weightClass: weightClass ?? undefined, courseDistanceM },
       env.DB
     );
     if (handicap) {
