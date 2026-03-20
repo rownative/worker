@@ -43,7 +43,7 @@ export default {
           })
         : courses;
 
-      return new Response(JSON.stringify(filtered), {
+      return new Response(JSON.stringify({ courses: filtered }), {
         headers: {
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*',
@@ -314,6 +314,59 @@ export default {
       const athleteId = await getAthleteIdFromRequest(request, env);
       if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
       const result = await handleDeleteCourseTime(timeId, athleteId, env);
+      return result;
+    }
+
+    // GET /api/challenges?status=active|upcoming|past
+    const challengesListMatch = path.match(/^\/api\/challenges\/?$/);
+    if (challengesListMatch && request.method === 'GET') {
+      const status = url.searchParams.get('status') || 'active';
+      const validStatus = ['active', 'upcoming', 'past'].includes(status) ? status : 'active';
+      const result = await handleListChallenges(validStatus, env);
+      return result;
+    }
+
+    // GET /api/challenges/:id
+    const challengeDetailMatch = path.match(/^\/api\/challenges\/([^/]+)\/?$/);
+    if (challengeDetailMatch && request.method === 'GET') {
+      const challengeId = challengeDetailMatch[1];
+      const result = await handleChallengeDetail(challengeId, env);
+      return result;
+    }
+
+    // GET /api/organiser/challenges
+    if ((path === '/api/organiser/challenges' || path === '/api/organiser/challenges/') && request.method === 'GET') {
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      const result = await handleOrganiserChallengesList(athleteId, env);
+      return result;
+    }
+
+    // POST /api/organiser/challenges
+    if ((path === '/api/organiser/challenges' || path === '/api/organiser/challenges/') && request.method === 'POST') {
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      const isOrg = await isOrganizer(athleteId, env);
+      if (!isOrg) return jsonResponse({ error: 'Organiser access required' }, 403, true);
+      const result = await handleCreateChallenge(request, athleteId, env);
+      return result;
+    }
+
+    // GET /api/organiser/standard-collections
+    if ((path === '/api/organiser/standard-collections' || path === '/api/organiser/standard-collections/') && request.method === 'GET') {
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      const result = await handleListStandardCollections(env);
+      return result;
+    }
+
+    // POST /api/organiser/standard-collections
+    if ((path === '/api/organiser/standard-collections' || path === '/api/organiser/standard-collections/') && request.method === 'POST') {
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      const isOrg = await isOrganizer(athleteId, env);
+      if (!isOrg) return jsonResponse({ error: 'Organiser access required' }, 403, true);
+      const result = await handleCreateStandardCollection(request, athleteId, env);
       return result;
     }
 
@@ -1064,6 +1117,295 @@ async function handleDeleteCourseTime(timeId: string, athleteId: string, env: En
     const msg = e instanceof Error ? e.message : 'Database error';
     return jsonResponse({ error: msg }, 500, true);
   }
+}
+
+// ── Challenges API ───────────────────────────────────────────────────────────
+
+const REMOVED_CHALLENGES_CACHE_KEY = 'removed-challenges:list';
+const REMOVED_CHALLENGES_CACHE_TTL = 300;
+const COURSE_INDEX_CACHE_KEY = 'course-index:json';
+const COURSE_INDEX_CACHE_TTL = 300;
+
+async function getRemovedChallengeIds(env: Env): Promise<Set<string>> {
+  const cached = await env.ROWING_COURSES.get(REMOVED_CHALLENGES_CACHE_KEY);
+  if (cached) {
+    try {
+      const arr = JSON.parse(cached) as unknown;
+      return new Set(Array.isArray(arr) ? arr.map(String) : []);
+    } catch {
+      // fall through
+    }
+  }
+  const res = await fetch(`${COURSES_BASE}/courses/removed-challenges.json`);
+  if (!res.ok) return new Set();
+  try {
+    const arr = (await res.json()) as unknown;
+    const ids = Array.isArray(arr) ? arr.map(String) : [];
+    await env.ROWING_COURSES.put(REMOVED_CHALLENGES_CACHE_KEY, JSON.stringify(ids), {
+      expirationTtl: REMOVED_CHALLENGES_CACHE_TTL,
+    });
+    return new Set(ids);
+  } catch {
+    return new Set();
+  }
+}
+
+async function getCourseIndex(env: Env): Promise<Array<{ id: string; name?: string }>> {
+  const cached = await env.ROWING_COURSES.get(COURSE_INDEX_CACHE_KEY);
+  if (cached) {
+    try {
+      const arr = JSON.parse(cached) as unknown;
+      return Array.isArray(arr) ? arr : [];
+    } catch {
+      // fall through
+    }
+  }
+  const res = await fetch(`${COURSES_BASE}/courses/index.json`);
+  if (!res.ok) return [];
+  try {
+    const arr = (await res.json()) as unknown;
+    const courses = Array.isArray(arr) ? arr : [];
+    await env.ROWING_COURSES.put(COURSE_INDEX_CACHE_KEY, JSON.stringify(courses), {
+      expirationTtl: COURSE_INDEX_CACHE_TTL,
+    });
+    return courses;
+  } catch {
+    return [];
+  }
+}
+
+function courseNameById(courses: Array<{ id: string; name?: string }>, id: string): string {
+  const c = courses.find((x) => String(x.id) === String(id));
+  return c?.name ?? `Course ${id}`;
+}
+
+const BUILTIN_COLLECTIONS: Record<string, string> = {
+  hocr: 'HOCR',
+  fisa: 'FISA Masters',
+  charles: 'Charles River',
+};
+
+function collectionNameById(id: string | null, custom: Map<string, string>): string | null {
+  if (!id) return null;
+  if (BUILTIN_COLLECTIONS[id]) return BUILTIN_COLLECTIONS[id];
+  return custom.get(id) ?? id;
+}
+
+function challengeToApi(row: Record<string, unknown>, courses: Array<{ id: string; name?: string }>, collectionNames: Map<string, string>): Record<string, unknown> {
+  const courseId = String(row.course_id ?? '');
+  const collectionId = row.collection_id ? String(row.collection_id) : null;
+  return {
+    id: row.id,
+    name: row.name,
+    courseId,
+    courseName: courseNameById(courses, courseId),
+    rowStart: row.row_start,
+    rowEnd: row.row_end,
+    submitEnd: row.submit_end,
+    collectionId,
+    collectionName: collectionNameById(collectionId, collectionNames),
+    hasHandicap: !!collectionId,
+    organizerId: row.organizer_id,
+    resultsCount: row.results_count ?? 0,
+    isPublic: (row.is_public ?? 1) !== 0,
+    notes: row.notes ?? null,
+  };
+}
+
+function challengeDetailToApi(row: Record<string, unknown>, courses: Array<{ id: string; name?: string }>, collectionNames: Map<string, string>): Record<string, unknown> {
+  const base = challengeToApi(row, courses, collectionNames);
+  return { ...base, organizerName: null };
+}
+
+async function handleListChallenges(status: string, env: Env): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  const removed = await getRemovedChallengeIds(env);
+  const courses = await getCourseIndex(env);
+  try {
+    const r = await env.DB.prepare(
+      `SELECT c.*, (SELECT COUNT(*) FROM challenge_results cr WHERE cr.challenge_id = c.id AND cr.validation_status IN ('valid', 'manual_ok')) as results_count
+       FROM challenges c
+       WHERE c.is_public = 1
+       ORDER BY c.row_start DESC`
+    )
+      .all();
+    const rows = (r.results ?? []) as Record<string, unknown>[];
+    const customColls = await loadCollectionNames(env);
+    const now = new Date();
+    const filtered = rows
+      .filter((row) => !removed.has(String(row.id ?? '')))
+      .filter((row) => {
+        const rs = row.row_start ? new Date(String(row.row_start)) : now;
+        const re = row.row_end ? new Date(String(row.row_end)) : now;
+        const se = row.submit_end ? new Date(String(row.submit_end)) : now;
+        if (status === 'active') return rs <= now && now <= re && now <= se;
+        if (status === 'upcoming') return rs > now;
+        if (status === 'past') return re < now || se < now;
+        return false;
+      })
+      .map((row) => challengeToApi(row, courses, customColls));
+    return jsonResponse({ challenges: filtered }, 200, true);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ error: msg }, 500, true);
+  }
+}
+
+async function loadCollectionNames(env: Env): Promise<Map<string, string>> {
+  if (!env.DB) return new Map();
+  try {
+    const r = await env.DB.prepare('SELECT id, name FROM standard_collections').all();
+    const rows = (r.results ?? []) as Array<{ id: string; name: string }>;
+    return new Map(rows.map((x) => [x.id, x.name]));
+  } catch {
+    return new Map();
+  }
+}
+
+async function handleChallengeDetail(challengeId: string, env: Env): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  const removed = await getRemovedChallengeIds(env);
+  if (removed.has(challengeId)) return jsonResponse({ error: 'Not found' }, 404, true);
+  try {
+    const r = await env.DB.prepare(
+      'SELECT * FROM challenges WHERE id = ? AND is_public = 1'
+    )
+      .bind(challengeId)
+      .first();
+    if (!r) return jsonResponse({ error: 'Not found' }, 404, true);
+    const row = r as Record<string, unknown>;
+    const courses = await getCourseIndex(env);
+    const customColls = await loadCollectionNames(env);
+    const api = challengeDetailToApi(row, courses, customColls);
+    return jsonResponse(api, 200, true);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ error: msg }, 500, true);
+  }
+}
+
+async function handleOrganiserChallengesList(athleteId: string, env: Env): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  try {
+    const r = await env.DB.prepare(
+      `SELECT c.*, (SELECT COUNT(*) FROM challenge_results cr WHERE cr.challenge_id = c.id AND cr.validation_status IN ('valid', 'manual_ok')) as results_count
+       FROM challenges c
+       WHERE c.organizer_id = ?
+       ORDER BY c.created_at DESC`
+    )
+      .bind(athleteId)
+      .all();
+    const rows = (r.results ?? []) as Record<string, unknown>[];
+    const courses = await getCourseIndex(env);
+    const customColls = await loadCollectionNames(env);
+    const api = rows.map((row) => challengeToApi(row, courses, customColls));
+    return jsonResponse({ challenges: api }, 200, true);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ error: msg }, 500, true);
+  }
+}
+
+async function handleCreateChallenge(request: Request, athleteId: string, env: Env): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  let body: { name?: string; courseId?: string; rowStart?: string; rowEnd?: string; submitEnd?: string; collectionId?: string; notes?: string; isPublic?: boolean };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return jsonResponse({ error: 'Invalid JSON body' }, 400, true);
+  }
+  const name = body.name?.trim();
+  const courseId = body.courseId ? String(body.courseId) : null;
+  const rowStart = body.rowStart ? String(body.rowStart).slice(0, 19) : null;
+  const rowEnd = body.rowEnd ? String(body.rowEnd).slice(0, 19) : null;
+  const submitEnd = body.submitEnd ? String(body.submitEnd).slice(0, 19) : null;
+  if (!name || !courseId || !rowStart || !rowEnd || !submitEnd) {
+    return jsonResponse({ error: 'name, courseId, rowStart, rowEnd, submitEnd required' }, 400, true);
+  }
+  const collectionId = body.collectionId ? String(body.collectionId).trim() || null : null;
+  const notes = body.notes?.trim() || null;
+  const isPublic = body.isPublic !== false ? 1 : 0;
+  const id = crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+  try {
+    await env.DB.prepare(
+      `INSERT INTO challenges (id, name, course_id, row_start, row_end, submit_end, collection_id, organizer_id, is_public, notes, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(id, name, courseId, rowStart, rowEnd, submitEnd, collectionId, athleteId, isPublic, notes, createdAt)
+      .run();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ error: msg }, 500, true);
+  }
+  const courses = await getCourseIndex(env);
+  const customColls = await loadCollectionNames(env);
+  const challenge = challengeToApi(
+    { id, name, course_id: courseId, row_start: rowStart, row_end: rowEnd, submit_end: submitEnd, collection_id: collectionId, organizer_id: athleteId, is_public: isPublic, notes, results_count: 0 },
+    courses,
+    customColls
+  );
+  return jsonResponse({ id, challenge }, 200, true);
+}
+
+async function handleListStandardCollections(env: Env): Promise<Response> {
+  const builtin = [
+    { id: 'hocr', name: 'HOCR', isBuiltin: true },
+    { id: 'fisa', name: 'FISA Masters', isBuiltin: true },
+    { id: 'charles', name: 'Charles River', isBuiltin: true },
+  ];
+  if (!env.DB) return jsonResponse({ collections: builtin }, 200, true);
+  try {
+    const r = await env.DB.prepare(
+      'SELECT id, name, is_builtin FROM standard_collections ORDER BY created_at DESC'
+    )
+      .all();
+    const rows = (r.results ?? []) as Array<{ id: string; name: string; is_builtin: number }>;
+    const custom = rows.map((x) => ({
+      id: x.id,
+      name: x.name,
+      isBuiltin: x.is_builtin !== 0,
+    }));
+    return jsonResponse({ collections: [...builtin, ...custom] }, 200, true);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ collections: builtin }, 200, true);
+  }
+}
+
+async function handleCreateStandardCollection(request: Request, athleteId: string, env: Env): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  const contentType = request.headers.get('Content-Type') ?? '';
+  let name = 'Custom collection';
+  if (contentType.includes('multipart/form-data')) {
+    try {
+      const formData = await request.formData();
+      const n = formData.get('name');
+      if (n && typeof n === 'string') name = n.trim() || name;
+    } catch {
+      // use default
+    }
+  } else {
+    try {
+      const body = (await request.json()) as { name?: string };
+      if (body?.name?.trim()) name = body.name.trim();
+    } catch {
+      // use default
+    }
+  }
+  const id = crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+  try {
+    await env.DB.prepare(
+      'INSERT INTO standard_collections (id, name, is_builtin, organizer_id, created_at) VALUES (?, ?, 0, ?, ?)'
+    )
+      .bind(id, name, athleteId, createdAt)
+      .run();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ error: msg }, 500, true);
+  }
+  return jsonResponse({ id, message: 'Created' }, 200, true);
 }
 
 type OpenCoursePRResult = { ok: true; prUrl: string } | { ok: false; error: string };

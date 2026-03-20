@@ -59,11 +59,13 @@ describe('Rowing Courses Worker', () => {
 			expect(response.status).toBe(200);
 			expect(response.headers.get('Content-Type')).toContain('application/json');
 			const data = await response.json();
-			expect(Array.isArray(data)).toBe(true);
-			expect(data.length).toBeGreaterThan(0);
-			expect(data[0]).toHaveProperty('id');
-			expect(data[0]).toHaveProperty('center_lat');
-			expect(data[0]).toHaveProperty('center_lon');
+			expect(data).toHaveProperty('courses');
+			const courses = data.courses;
+			expect(Array.isArray(courses)).toBe(true);
+			expect(courses.length).toBeGreaterThan(0);
+			expect(courses[0]).toHaveProperty('id');
+			expect(courses[0]).toHaveProperty('center_lat');
+			expect(courses[0]).toHaveProperty('center_lon');
 		});
 
 		it('returns filtered courses when lat, lon, radius provided', async () => {
@@ -73,7 +75,9 @@ describe('Rowing Courses Worker', () => {
 			expect(response.status).toBe(200);
 			expect(response.headers.get('Content-Type')).toContain('application/json');
 			const data = await response.json();
-			expect(Array.isArray(data)).toBe(true);
+			expect(data).toHaveProperty('courses');
+			const courses = data.courses;
+			expect(Array.isArray(courses)).toBe(true);
 			// All returned courses should be within 50 km of (42, -71)
 			const haversine = (a: { lat: number; lon: number }, b: { lat: number; lon: number }) => {
 				const R = 6371000;
@@ -86,7 +90,7 @@ describe('Rowing Courses Worker', () => {
 				return 2 * R * Math.asin(Math.sqrt(x));
 			};
 			const center = { lat: 42, lon: -71 };
-			for (const c of data) {
+			for (const c of courses) {
 				if (c.center_lat != null && c.center_lon != null) {
 					expect(haversine(center, { lat: c.center_lat, lon: c.center_lon })).toBeLessThanOrEqual(50000);
 				}

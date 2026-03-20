@@ -12,7 +12,7 @@ The worker runs on Cloudflare and handles all `/api/*` and `/oauth/*` routes for
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
-| `/api/courses` | GET | — | Course index JSON. Optional geo filter: `?lat=&lon=&radius=` (all in meters; filters by haversine distance from center) |
+| `/api/courses` | GET | — | Course index. Returns `{ courses }`. Optional geo filter: `?lat=&lon=&radius=` (all in meters; filters by haversine distance from center) |
 | `/api/courses/kml` | GET | — | KML bundle for course IDs. Query: `?ids=1,2,3` (required) |
 | `/api/courses/{id}` | GET | — | Single course KML. Optional: `?cn=true` for Chinese KML variant |
 | `/api/me` | GET | — | Current user: `{ athleteId, liked, isOrganizer }` or `{ athleteId: null, liked: [], isOrganizer: false }` |
@@ -33,6 +33,22 @@ The worker runs on Cloudflare and handles all `/api/*` and `/oauth/*` routes for
 | `/api/courses/{id}/course-times` | POST | Cookie | Save course time. Body: `{ activityId, timeS, distanceM, validationNote?, workoutDate? }` (workoutDate: YYYY-MM-DD of the workout) |
 | `/api/me/course-times` | GET | Cookie | List saved course times (returns `{ courseTimes }` with `id`, `activity_id`, `course_id`, `time_s`, `distance_m`, `workout_date`, `created_at`, etc.) |
 | `/api/me/course-times/{id}` | DELETE | Cookie | Remove a saved course time by id |
+
+### Challenges (public)
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/api/challenges` | GET | — | List challenges. Query: `?status=active\|upcoming\|past` (default: active). Returns `{ challenges }` |
+| `/api/challenges/{id}` | GET | — | Challenge detail |
+
+### Organiser (auth + isOrganizer required)
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/api/organiser/challenges` | GET | Cookie | My challenges. Returns `{ challenges }` |
+| `/api/organiser/challenges` | POST | Cookie | Create challenge. Body: `{ name, courseId, rowStart, rowEnd, submitEnd, collectionId?, notes?, isPublic? }` |
+| `/api/organiser/standard-collections` | GET | Cookie | List standard collections (built-in + custom). Returns `{ collections }` |
+| `/api/organiser/standard-collections` | POST | Cookie | Create custom collection. Body: JSON `{ name }` or multipart `name` (+ optional `file`) |
 
 ### Authentication methods
 
