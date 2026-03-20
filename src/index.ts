@@ -1,6 +1,7 @@
 import { unzipSync } from 'fflate';
 import { kmlToCourse, haversine } from './kml-to-course';
 import { calculateCourseTime, type TrackPoint } from './course-time';
+import { computeHandicap } from './handicap';
 import {
   fetchIntervalsActivities,
   fetchIntervalsActivity,
@@ -386,6 +387,39 @@ export default {
       const isOrg = await isOrganizer(athleteId, env);
       if (!isOrg) return jsonResponse({ error: 'Organiser access required' }, 403, true);
       const result = await handleCreateStandardCollection(request, athleteId, env);
+      return result;
+    }
+
+    // GET /api/organiser/challenges/:id/results — all results including pending (organiser only)
+    const organiserResultsMatch = path.match(/^\/api\/organiser\/challenges\/([^/]+)\/results\/?$/);
+    if (organiserResultsMatch && request.method === 'GET') {
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      const isOrg = await isOrganizer(athleteId, env);
+      if (!isOrg) return jsonResponse({ error: 'Organiser access required' }, 403, true);
+      const result = await handleOrganiserChallengeResults(organiserResultsMatch[1], athleteId, env);
+      return result;
+    }
+
+    // POST /api/organiser/results/:id/override — approve or disqualify
+    const organiserOverrideMatch = path.match(/^\/api\/organiser\/results\/([^/]+)\/override\/?$/);
+    if (organiserOverrideMatch && request.method === 'POST') {
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      const isOrg = await isOrganizer(athleteId, env);
+      if (!isOrg) return jsonResponse({ error: 'Organiser access required' }, 403, true);
+      const result = await handleOrganiserResultOverride(request, organiserOverrideMatch[1], athleteId, env);
+      return result;
+    }
+
+    // GET /api/organiser/results/:id/track — track overlay for moderation
+    const organiserTrackMatch = path.match(/^\/api\/organiser\/results\/([^/]+)\/track\/?$/);
+    if (organiserTrackMatch && request.method === 'GET') {
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      const isOrg = await isOrganizer(athleteId, env);
+      if (!isOrg) return jsonResponse({ error: 'Organiser access required' }, 403, true);
+      const result = await handleOrganiserResultTrack(organiserTrackMatch[1], athleteId, env);
       return result;
     }
 
@@ -1392,15 +1426,30 @@ async function handleListStandardCollections(env: Env): Promise<Response> {
   }
 }
 
+function parseStandardTime(val: string): number | null {
+  const s = String(val || '').trim();
+  if (!s) return null;
+  const num = parseFloat(s);
+  if (!Number.isNaN(num) && num > 0) return num;
+  const mmss = s.match(/^(\d+):(\d{2})$/);
+  if (mmss) return parseInt(mmss[1], 10) * 60 + parseInt(mmss[2], 10);
+  return null;
+}
+
 async function handleCreateStandardCollection(request: Request, athleteId: string, env: Env): Promise<Response> {
   if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
   const contentType = request.headers.get('Content-Type') ?? '';
   let name = 'Custom collection';
+  let csvText: string | null = null;
   if (contentType.includes('multipart/form-data')) {
     try {
       const formData = await request.formData();
       const n = formData.get('name');
       if (n && typeof n === 'string') name = n.trim() || name;
+      const file = formData.get('file');
+      if (file && file instanceof Blob) {
+        csvText = await file.text();
+      }
     } catch {
       // use default
     }
@@ -1424,18 +1473,144 @@ async function handleCreateStandardCollection(request: Request, athleteId: strin
     const msg = e instanceof Error ? e.message : 'Database error';
     return jsonResponse({ error: msg }, 500, true);
   }
+  if (csvText && csvText.trim()) {
+    const lines = csvText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const header = lines[0]?.toLowerCase() ?? '';
+    const cols = header.split(/[,\t]/).map((c) => c.trim().toLowerCase());
+    const boatIdx = cols.findIndex((c) => c.includes('boattype') || c === 'boattype' || c === 'boat_class');
+    const sexIdx = cols.findIndex((c) => c === 'sex');
+    const wcIdx = cols.findIndex((c) => c.includes('weight') || c === 'weightclass');
+    const timeIdx = cols.findIndex((c) => c.includes('coursetime') || c.includes('standard') || c === 'time');
+    for (let i = 1; i < lines.length; i++) {
+      const cells = lines[i].split(/[,\t]/).map((c) => c.trim());
+      const boatType = (boatIdx >= 0 ? cells[boatIdx] : '1x') || '1x';
+      const sex = (sexIdx >= 0 ? cells[sexIdx] : 'M')?.toUpperCase().slice(0, 1) || 'M';
+      const weightClass = (wcIdx >= 0 ? cells[wcIdx] : 'HWT') || 'HWT';
+      const timeS = parseStandardTime(timeIdx >= 0 ? cells[timeIdx] : '');
+      if (timeS != null && timeS > 0) {
+        try {
+          await env.DB.prepare(
+            'INSERT OR REPLACE INTO course_standards (collection_id, boat_type, sex, weight_class, standard_time_s) VALUES (?, ?, ?, ?, ?)'
+          )
+            .bind(id, boatType, sex, weightClass, timeS)
+            .run();
+        } catch {
+          // skip row on error
+        }
+      }
+    }
+  }
   return jsonResponse({ id, message: 'Created' }, 200, true);
+}
+
+async function handleOrganiserChallengeResults(challengeId: string, athleteId: string, env: Env): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  const chRow = await env.DB.prepare('SELECT organizer_id FROM challenges WHERE id = ?').bind(challengeId).first();
+  if (!chRow) return jsonResponse({ error: 'Challenge not found' }, 404, true);
+  const organizerId = (chRow as { organizer_id: string }).organizer_id;
+  if (organizerId !== athleteId) return jsonResponse({ error: 'Not your challenge' }, 403, true);
+  try {
+    const r = await env.DB.prepare(
+      `SELECT * FROM challenge_results WHERE challenge_id = ? ORDER BY raw_time_s ASC`
+    )
+      .bind(challengeId)
+      .all();
+    const rows = (r.results ?? []) as Record<string, unknown>[];
+    const results = rows.map((row, i) => {
+      const startTime = row.start_time ? String(row.start_time) : '';
+      const workoutDate = startTime ? startTime.slice(0, 10) : null;
+      return {
+        id: row.id,
+        rank: i + 1,
+        challengeId: row.challenge_id,
+        athleteId: row.athlete_id,
+        activityId: row.activity_id,
+        displayName: row.display_name ?? null,
+        rawTimeS: row.raw_time_s,
+        correctedTimeS: row.corrected_time_s ?? row.raw_time_s,
+        points: row.points ?? null,
+        boatType: row.boat_type ?? null,
+        sex: row.sex ?? null,
+        workoutDate,
+        validationStatus: row.validation_status ?? 'valid',
+        validationNote: row.validation_note ?? null,
+      };
+    });
+    return jsonResponse({ results }, 200, true);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ error: msg }, 500, true);
+  }
+}
+
+async function handleOrganiserResultOverride(request: Request, resultId: string, athleteId: string, env: Env): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  let body: { status?: string; note?: string };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return jsonResponse({ error: 'Invalid JSON body' }, 400, true);
+  }
+  const status = body.status === 'dq' ? 'dq' : 'manual_ok';
+  const note = body.note ? String(body.note).trim().slice(0, 500) : '';
+
+  const row = await env.DB.prepare(
+    `SELECT cr.id, cr.challenge_id, c.organizer_id FROM challenge_results cr
+     JOIN challenges c ON c.id = cr.challenge_id WHERE cr.id = ?`
+  )
+    .bind(resultId)
+    .first();
+  if (!row) return jsonResponse({ error: 'Result not found' }, 404, true);
+  const r = row as { organizer_id: string };
+  if (r.organizer_id !== athleteId) return jsonResponse({ error: 'Not your challenge' }, 403, true);
+
+  await env.DB.prepare(
+    'UPDATE challenge_results SET validation_status = ?, validation_note = ? WHERE id = ?'
+  )
+    .bind(status, note, resultId)
+    .run();
+  return jsonResponse({ updated: true }, 200, true);
+}
+
+async function handleOrganiserResultTrack(
+  resultId: string,
+  athleteId: string,
+  env: Env
+): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  const row = await env.DB.prepare(
+    `SELECT cr.track_latlng, c.organizer_id FROM challenge_results cr
+     JOIN challenges c ON c.id = cr.challenge_id WHERE cr.id = ?`
+  )
+    .bind(resultId)
+    .first();
+  if (!row) return jsonResponse({ error: 'Result not found' }, 404, true);
+  const r = row as { track_latlng: string | null; organizer_id: string };
+  if (r.organizer_id !== athleteId) return jsonResponse({ error: 'Not your challenge' }, 403, true);
+
+  let latlng: [number, number][];
+  try {
+    latlng = r.track_latlng ? (JSON.parse(r.track_latlng) as [number, number][]) : [];
+  } catch {
+    latlng = [];
+  }
+  if (!Array.isArray(latlng) || latlng.length < 2) return jsonResponse({ error: 'No GPS track stored' }, 400, true);
+
+  return jsonResponse({ latlng }, 200, true);
 }
 
 async function handleChallengeResults(challengeId: string, env: Env): Promise<Response> {
   if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
   const removed = await getRemovedChallengeIds(env);
   if (removed.has(challengeId)) return jsonResponse({ error: 'Not found' }, 404, true);
+  const chRow = await env.DB.prepare('SELECT collection_id FROM challenges WHERE id = ?').bind(challengeId).first();
+  const hasHandicap = chRow && (chRow as { collection_id: string | null }).collection_id != null;
+  const orderCol = hasHandicap ? 'corrected_time_s' : 'raw_time_s';
   try {
     const r = await env.DB.prepare(
       `SELECT * FROM challenge_results
        WHERE challenge_id = ? AND validation_status IN ('valid', 'manual_ok')
-       ORDER BY raw_time_s ASC`
+       ORDER BY ${orderCol} ASC`
     )
       .bind(challengeId)
       .all();
@@ -1476,7 +1651,7 @@ async function handleChallengeSubmit(
   const removed = await getRemovedChallengeIds(env);
   if (removed.has(challengeId)) return jsonResponse({ error: 'Not found' }, 404, true);
 
-  let body: { activityId?: string; displayName?: string; boatType?: string; sex?: string };
+  let body: { activityId?: string; displayName?: string; boatType?: string; sex?: string; weightClass?: string };
   try {
     body = (await request.json()) as typeof body;
   } catch {
@@ -1547,10 +1722,12 @@ async function handleChallengeSubmit(
     track.push({ lat, lon, time: time[i] });
   }
 
+  const validationLog: string[] = [];
   const result = calculateCourseTime(
     course as { id: string; polygons: Array<{ name: string; order: number; points: Array<{ lat: number; lon: number }> }>; distance_m?: number },
     track,
-    haversine
+    haversine,
+    { log: validationLog }
   );
 
   if (!result.valid) {
@@ -1563,6 +1740,28 @@ async function handleChallengeSubmit(
   const displayName = body.displayName?.trim() || null;
   const boatType = body.boatType ? String(body.boatType).trim() || null : null;
   const sex = body.sex ? String(body.sex).trim() || null : null;
+  const weightClass = body.weightClass ? String(body.weightClass).trim() || null : null;
+
+  const collectionId = ch.collection_id ? String(ch.collection_id) : null;
+  let correctedTimeS = result.timeS;
+  let points: number | null = null;
+  if (collectionId && boatType && sex) {
+    const handicap = await computeHandicap(
+      collectionId,
+      { rawTimeS: result.timeS, boatType, sex, weightClass: weightClass ?? undefined },
+      env.DB
+    );
+    if (handicap) {
+      correctedTimeS = handicap.correctedTimeS;
+      points = handicap.points;
+    }
+  }
+
+  const validationNote = result.validationNote || '';
+
+  const maxPoints = 600;
+  const step = latlng.length <= maxPoints ? 1 : Math.ceil(latlng.length / maxPoints);
+  const trackLatlng = JSON.stringify(latlng.filter((_, i) => i % step === 0));
 
   const id = crypto.randomUUID();
   const submittedAt = new Date().toISOString();
@@ -1571,19 +1770,23 @@ async function handleChallengeSubmit(
 
   try {
     await env.DB.prepare(
-      `INSERT INTO challenge_results (id, challenge_id, athlete_id, activity_id, display_name, raw_time_s, corrected_time_s, boat_type, sex, start_time, validation_status, submitted_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'valid', ?)
+      `INSERT INTO challenge_results (id, challenge_id, athlete_id, activity_id, display_name, raw_time_s, corrected_time_s, points, boat_type, sex, weight_class, start_time, validation_status, validation_note, track_latlng, submitted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'valid', ?, ?, ?)
        ON CONFLICT(challenge_id, athlete_id, activity_id) DO UPDATE SET
          display_name = excluded.display_name,
          raw_time_s = excluded.raw_time_s,
          corrected_time_s = excluded.corrected_time_s,
+         points = excluded.points,
          boat_type = excluded.boat_type,
          sex = excluded.sex,
+         weight_class = excluded.weight_class,
          start_time = excluded.start_time,
          validation_status = 'valid',
+         validation_note = excluded.validation_note,
+         track_latlng = excluded.track_latlng,
          submitted_at = excluded.submitted_at`
     )
-      .bind(id, challengeId, athleteId, activityId, displayName, result.timeS, result.timeS, boatType, sex, startTime, submittedAt)
+      .bind(id, challengeId, athleteId, activityId, displayName, result.timeS, correctedTimeS, points, boatType, sex, weightClass, startTime, validationNote, trackLatlng, submittedAt)
       .run();
     const existing = await env.DB.prepare(
       'SELECT id FROM challenge_results WHERE challenge_id = ? AND athlete_id = ? AND activity_id = ?'
@@ -1596,22 +1799,33 @@ async function handleChallengeSubmit(
     return jsonResponse({ error: msg }, 500, true);
   }
 
-  const countResult = await env.DB.prepare(
-    `SELECT COUNT(*) as cnt FROM challenge_results
-     WHERE challenge_id = ? AND validation_status IN ('valid', 'manual_ok') AND raw_time_s <= ?`
-  )
-    .bind(challengeId, result.timeS)
-    .first();
-  const rank = (countResult as { cnt: number })?.cnt ?? 1;
+  let rank: number;
+  if (points != null) {
+    const countResult = await env.DB.prepare(
+      `SELECT COUNT(*) as cnt FROM challenge_results
+       WHERE challenge_id = ? AND validation_status IN ('valid', 'manual_ok') AND corrected_time_s <= ?`
+    )
+      .bind(challengeId, correctedTimeS)
+      .first();
+    rank = (countResult as { cnt: number })?.cnt ?? 1;
+  } else {
+    const countResult = await env.DB.prepare(
+      `SELECT COUNT(*) as cnt FROM challenge_results
+       WHERE challenge_id = ? AND validation_status IN ('valid', 'manual_ok') AND raw_time_s <= ?`
+    )
+      .bind(challengeId, result.timeS)
+      .first();
+    rank = (countResult as { cnt: number })?.cnt ?? 1;
+  }
 
   return jsonResponse({
     success: true,
     resultId,
     rank,
     rawTimeS: result.timeS,
-    correctedTimeS: result.timeS,
-    points: null,
-    validationNote: '',
+    correctedTimeS,
+    points,
+    validationNote,
   }, 200, true);
 }
 
