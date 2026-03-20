@@ -40,6 +40,8 @@ The worker runs on Cloudflare and handles all `/api/*` and `/oauth/*` routes for
 |----------|--------|------|-------------|
 | `/api/challenges` | GET | — | List challenges. Query: `?status=active\|upcoming\|past` (default: active). Returns `{ challenges }` |
 | `/api/challenges/{id}` | GET | — | Challenge detail |
+| `/api/challenges/{id}/results` | GET | — | Leaderboard results (valid/manual_ok only). Returns `{ results }` |
+| `/api/challenges/{id}/submit` | POST | Cookie | Submit result. Body: `{ activityId, displayName?, boatType?, sex? }`. GPS validation via calculateCourseTime; workout date must be within row window |
 
 ### Organiser (auth + isOrganizer required)
 

@@ -3,6 +3,7 @@ import { kmlToCourse, haversine } from './kml-to-course';
 import { calculateCourseTime, type TrackPoint } from './course-time';
 import {
   fetchIntervalsActivities,
+  fetchIntervalsActivity,
   fetchIntervalsStreams,
   isOtwRowing,
   type IntervalsActivity,
@@ -323,6 +324,24 @@ export default {
       const status = url.searchParams.get('status') || 'active';
       const validStatus = ['active', 'upcoming', 'past'].includes(status) ? status : 'active';
       const result = await handleListChallenges(validStatus, env);
+      return result;
+    }
+
+    // GET /api/challenges/:id/results
+    const challengeResultsMatch = path.match(/^\/api\/challenges\/([^/]+)\/results\/?$/);
+    if (challengeResultsMatch && request.method === 'GET') {
+      const challengeId = challengeResultsMatch[1];
+      const result = await handleChallengeResults(challengeId, env);
+      return result;
+    }
+
+    // POST /api/challenges/:id/submit
+    const challengeSubmitMatch = path.match(/^\/api\/challenges\/([^/]+)\/submit\/?$/);
+    if (challengeSubmitMatch && request.method === 'POST') {
+      const challengeId = challengeSubmitMatch[1];
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      const result = await handleChallengeSubmit(request, challengeId, athleteId, env);
       return result;
     }
 
@@ -1406,6 +1425,194 @@ async function handleCreateStandardCollection(request: Request, athleteId: strin
     return jsonResponse({ error: msg }, 500, true);
   }
   return jsonResponse({ id, message: 'Created' }, 200, true);
+}
+
+async function handleChallengeResults(challengeId: string, env: Env): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  const removed = await getRemovedChallengeIds(env);
+  if (removed.has(challengeId)) return jsonResponse({ error: 'Not found' }, 404, true);
+  try {
+    const r = await env.DB.prepare(
+      `SELECT * FROM challenge_results
+       WHERE challenge_id = ? AND validation_status IN ('valid', 'manual_ok')
+       ORDER BY raw_time_s ASC`
+    )
+      .bind(challengeId)
+      .all();
+    const rows = (r.results ?? []) as Record<string, unknown>[];
+    const results = rows.map((row, i) => {
+      const startTime = row.start_time ? String(row.start_time) : '';
+      const workoutDate = startTime ? startTime.slice(0, 10) : null;
+      return {
+        id: row.id,
+        rank: i + 1,
+        challengeId: row.challenge_id,
+        athleteId: row.athlete_id,
+        activityId: row.activity_id,
+        displayName: row.display_name ?? null,
+        rawTimeS: row.raw_time_s,
+        correctedTimeS: row.corrected_time_s ?? row.raw_time_s,
+        points: row.points ?? null,
+        boatType: row.boat_type ?? null,
+        sex: row.sex ?? null,
+        workoutDate,
+        validationStatus: row.validation_status ?? 'valid',
+      };
+    });
+    return jsonResponse({ results }, 200, true);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ error: msg }, 500, true);
+  }
+}
+
+async function handleChallengeSubmit(
+  request: Request,
+  challengeId: string,
+  athleteId: string,
+  env: Env
+): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  const removed = await getRemovedChallengeIds(env);
+  if (removed.has(challengeId)) return jsonResponse({ error: 'Not found' }, 404, true);
+
+  let body: { activityId?: string; displayName?: string; boatType?: string; sex?: string };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return jsonResponse({ error: 'Invalid JSON body' }, 400, true);
+  }
+  const activityId = body.activityId ? String(body.activityId).trim() : null;
+  if (!activityId) return jsonResponse({ error: 'activityId required' }, 400, true);
+
+  const session = await getSessionFromRequest(request, env);
+  if (!session) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+
+  // Load challenge
+  const chRow = await env.DB.prepare(
+    'SELECT * FROM challenges WHERE id = ? AND is_public = 1'
+  )
+    .bind(challengeId)
+    .first();
+  if (!chRow) return jsonResponse({ error: 'Challenge not found' }, 404, true);
+  const ch = chRow as Record<string, unknown>;
+  const courseId = String(ch.course_id ?? '');
+  const rowStart = ch.row_start ? String(ch.row_start).slice(0, 10) : '';
+  const rowEnd = ch.row_end ? String(ch.row_end).slice(0, 10) : '';
+  const submitEnd = ch.submit_end ? String(ch.submit_end) : '';
+
+  const now = new Date();
+  if (submitEnd && new Date(submitEnd) < now) {
+    return jsonResponse({ error: 'Submissions closed' }, 400, true);
+  }
+
+  // Fetch activity for workout start date
+  const activity = await fetchIntervalsActivity(activityId, session.accessToken);
+  if (!activity) return jsonResponse({ error: 'Activity not found' }, 404, true);
+  const startDateLocal = activity.start_date_local ? String(activity.start_date_local).slice(0, 10) : null;
+  if (!startDateLocal) {
+    return jsonResponse({ error: 'Activity has no start date' }, 400, true);
+  }
+  if (startDateLocal < rowStart || startDateLocal > rowEnd) {
+    return jsonResponse({
+      error: `Workout date ${startDateLocal} is outside the row window (${rowStart} – ${rowEnd})`,
+    }, 400, true);
+  }
+
+  // Fetch course JSON
+  const courseRes = await fetch(`${COURSES_BASE}/courses/${courseId}.json`);
+  if (!courseRes.ok) return jsonResponse({ error: 'Course not found' }, 404, true);
+  const course = (await courseRes.json()) as { id: string; polygons: unknown[]; distance_m?: number };
+  if (!course.polygons || course.polygons.length < 2) {
+    return jsonResponse({ error: 'Invalid course' }, 400, true);
+  }
+
+  // Fetch streams and run calculateCourseTime
+  let streams: { latlng?: [number, number][]; time?: number[] };
+  try {
+    streams = await fetchIntervalsStreams(activityId, session.accessToken);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Failed to fetch activity streams';
+    return jsonResponse({ error: msg }, 502, true);
+  }
+  const latlng = streams.latlng;
+  const time = streams.time;
+  if (!latlng || !time || latlng.length < 2 || time.length < 2) {
+    return jsonResponse({ error: 'Activity has no GPS track' }, 400, true);
+  }
+  const len = Math.min(latlng.length, time.length);
+  const track: TrackPoint[] = [];
+  for (let i = 0; i < len; i++) {
+    const [lat, lon] = latlng[i];
+    track.push({ lat, lon, time: time[i] });
+  }
+
+  const result = calculateCourseTime(
+    course as { id: string; polygons: Array<{ name: string; order: number; points: Array<{ lat: number; lon: number }> }>; distance_m?: number },
+    track,
+    haversine
+  );
+
+  if (!result.valid) {
+    return jsonResponse({
+      error: 'Validation failed',
+      validationNote: result.validationNote,
+    }, 400, true);
+  }
+
+  const displayName = body.displayName?.trim() || null;
+  const boatType = body.boatType ? String(body.boatType).trim() || null : null;
+  const sex = body.sex ? String(body.sex).trim() || null : null;
+
+  const id = crypto.randomUUID();
+  const submittedAt = new Date().toISOString();
+  const startTime = activity.start_date_local ? String(activity.start_date_local) : submittedAt;
+  let resultId = id;
+
+  try {
+    await env.DB.prepare(
+      `INSERT INTO challenge_results (id, challenge_id, athlete_id, activity_id, display_name, raw_time_s, corrected_time_s, boat_type, sex, start_time, validation_status, submitted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'valid', ?)
+       ON CONFLICT(challenge_id, athlete_id, activity_id) DO UPDATE SET
+         display_name = excluded.display_name,
+         raw_time_s = excluded.raw_time_s,
+         corrected_time_s = excluded.corrected_time_s,
+         boat_type = excluded.boat_type,
+         sex = excluded.sex,
+         start_time = excluded.start_time,
+         validation_status = 'valid',
+         submitted_at = excluded.submitted_at`
+    )
+      .bind(id, challengeId, athleteId, activityId, displayName, result.timeS, result.timeS, boatType, sex, startTime, submittedAt)
+      .run();
+    const existing = await env.DB.prepare(
+      'SELECT id FROM challenge_results WHERE challenge_id = ? AND athlete_id = ? AND activity_id = ?'
+    )
+      .bind(challengeId, athleteId, activityId)
+      .first();
+    resultId = (existing as { id: string } | null)?.id ?? id;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ error: msg }, 500, true);
+  }
+
+  const countResult = await env.DB.prepare(
+    `SELECT COUNT(*) as cnt FROM challenge_results
+     WHERE challenge_id = ? AND validation_status IN ('valid', 'manual_ok') AND raw_time_s <= ?`
+  )
+    .bind(challengeId, result.timeS)
+    .first();
+  const rank = (countResult as { cnt: number })?.cnt ?? 1;
+
+  return jsonResponse({
+    success: true,
+    resultId,
+    rank,
+    rawTimeS: result.timeS,
+    correctedTimeS: result.timeS,
+    points: null,
+    validationNote: '',
+  }, 200, true);
 }
 
 type OpenCoursePRResult = { ok: true; prUrl: string } | { ok: false; error: string };

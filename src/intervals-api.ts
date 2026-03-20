@@ -100,6 +100,22 @@ function parseStreamsResponse(raw: unknown): IntervalsStreams {
 }
 
 /**
+ * Fetch a single activity by ID (for start_date_local).
+ */
+export async function fetchIntervalsActivity(
+  activityId: string,
+  accessToken: string
+): Promise<IntervalsActivity | null> {
+  const url = `${INTERVALS_BASE}/api/v1/activity/${activityId}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  return data as IntervalsActivity;
+}
+
+/**
  * Fetch GPS + time streams for an activity.
  */
 export async function fetchIntervalsStreams(
