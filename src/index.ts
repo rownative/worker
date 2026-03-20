@@ -899,6 +899,7 @@ async function handleCalculateTime(
     track,
     haversine
   );
+
   // Downsample latlng for map overlay (max ~600 points)
   const maxPoints = 600;
   const step = latlng.length <= maxPoints ? 1 : Math.ceil(latlng.length / maxPoints);
