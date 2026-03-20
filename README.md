@@ -15,7 +15,7 @@ The worker runs on Cloudflare and handles all `/api/*` and `/oauth/*` routes for
 | `/api/courses` | GET | — | Course index JSON. Optional geo filter: `?lat=&lon=&radius=` (all in meters; filters by haversine distance from center) |
 | `/api/courses/kml` | GET | — | KML bundle for course IDs. Query: `?ids=1,2,3` (required) |
 | `/api/courses/{id}` | GET | — | Single course KML. Optional: `?cn=true` for Chinese KML variant |
-| `/api/me` | GET | — | Current user: `{ athleteId, liked }` or `{ athleteId: null, liked: [] }` |
+| `/api/me` | GET | — | Current user: `{ athleteId, liked, isOrganizer }` or `{ athleteId: null, liked: [], isOrganizer: false }` |
 
 ### Authenticated endpoints (cookie or API key)
 
@@ -85,7 +85,7 @@ Create a KV namespace and add it to `wrangler.jsonc`:
 ]
 ```
 
-The worker uses KV for: liked courses per athlete, OAuth state (fallback when cookies don't persist), and session-related data.
+The worker uses KV for: liked courses per athlete, OAuth state (fallback when cookies don't persist), organisers list (cached from `courses/organisers.json` on GitHub), and session-related data.
 
 ### 3. D1 database (Phase 2a — course times)
 

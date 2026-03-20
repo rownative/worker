@@ -30,7 +30,7 @@ describe('Rowing Courses Worker', () => {
 		expect(response.status).toBe(200);
 		expect(response.headers.get('Content-Type')).toContain('application/json');
 		const data = await response.json();
-		expect(data).toEqual({ athleteId: null, liked: [] });
+  expect(data).toEqual({ athleteId: null, liked: [], isOrganizer: false });
 	});
 
 	it('GET /api/courses/kml without ids returns 400', async () => {

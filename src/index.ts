@@ -11,6 +11,8 @@ import {
 // Rowing courses API
 const COURSES_BASE = 'https://raw.githubusercontent.com/rownative/courses/main';
 const GITHUB_API = 'https://api.github.com';
+const ORGANISERS_CACHE_KEY = 'organisers:list';
+const ORGANISERS_CACHE_TTL = 300; // 5 minutes
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -96,9 +98,16 @@ export default {
     // GET /api/me — 200 with null when unauthenticated (avoids console noise)
     if (path === '/api/me' || path === '/api/me/') {
       const athleteId = await getAthleteIdFromRequest(request, env);
-      const payload = athleteId
-        ? { athleteId, liked: JSON.parse((await env.ROWING_COURSES.get(`liked:${athleteId}`)) ?? '[]') }
-        : { athleteId: null, liked: [] };
+      let payload: { athleteId: string | null; liked: string[]; isOrganizer?: boolean };
+      if (athleteId) {
+        const [liked, isOrg] = await Promise.all([
+          env.ROWING_COURSES.get(`liked:${athleteId}`).then((v) => JSON.parse(v ?? '[]') as string[]),
+          isOrganizer(athleteId, env),
+        ]);
+        payload = { athleteId, liked, isOrganizer: isOrg };
+      } else {
+        payload = { athleteId: null, liked: [], isOrganizer: false };
+      }
       return new Response(JSON.stringify(payload), {
         headers: {
           'Content-Type': 'application/json',
@@ -368,6 +377,40 @@ async function getAthleteIdFromRequest(request: Request, env: Env): Promise<stri
     return athleteId;
   }
   return null;
+}
+
+/** Fetch organisers.json from GitHub, cached in KV. Returns set of athlete IDs. */
+async function getOrganiserIds(env: Env): Promise<Set<string>> {
+  const cached = await env.ROWING_COURSES.get(ORGANISERS_CACHE_KEY);
+  if (cached) {
+    try {
+      const arr = JSON.parse(cached) as unknown;
+      const ids = Array.isArray(arr) ? arr.map((x) => String(x)) : [];
+      return new Set(ids);
+    } catch {
+      // fall through to fetch
+    }
+  }
+  const res = await fetch(`${COURSES_BASE}/courses/organisers.json`);
+  if (!res.ok) {
+    return new Set();
+  }
+  try {
+    const arr = (await res.json()) as unknown;
+    const ids = Array.isArray(arr) ? arr.map((x) => String(x)) : [];
+    await env.ROWING_COURSES.put(ORGANISERS_CACHE_KEY, JSON.stringify(ids), {
+      expirationTtl: ORGANISERS_CACHE_TTL,
+    });
+    return new Set(ids);
+  } catch {
+    return new Set();
+  }
+}
+
+/** Check if athlete is an organiser (from organisers.json). */
+async function isOrganizer(athleteId: string, env: Env): Promise<boolean> {
+  const ids = await getOrganiserIds(env);
+  return ids.has(athleteId);
 }
 
 /** Get session from cookie (browser auth). Returns null for API key. */
