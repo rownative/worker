@@ -153,9 +153,11 @@ export default {
         || url.hostname === 'localhost' || url.hostname === '127.0.0.1';
       const redirectUri = isLocal ? 'http://localhost:8787/oauth/callback' : 'https://rownative.icu/oauth/callback';
       const state = crypto.randomUUID();
+      const returnTo = url.searchParams.get('return_to');
       console.log(`[oauth] authorize: generated state=${state}, redirect_uri=${redirectUri}`);
-      // Store state in KV for iOS fallback; value 'local' signals local dev for callback
-      await env.ROWING_COURSES.put(`oauth_state:${state}`, isLocal ? 'local' : '1', { expirationTtl: 600 });
+      // Store state in KV; value 'local' or 'local:<returnTo>' signals local dev
+      const stateVal = isLocal ? (returnTo ? `local:${returnTo}` : 'local') : '1';
+      await env.ROWING_COURSES.put(`oauth_state:${state}`, stateVal, { expirationTtl: 600 });
       const params = new URLSearchParams({
         client_id: env.INTERVALS_CLIENT_ID,
         redirect_uri: redirectUri,
@@ -193,7 +195,8 @@ export default {
         return new Response(reason, { status: 400 });
       }
       await env.ROWING_COURSES.delete(`oauth_state:${state}`);
-      const isLocal = kvVal === 'local';
+      const isLocal = kvVal === 'local' || (typeof kvVal === 'string' && kvVal.startsWith('local:'));
+      const returnTo = (typeof kvVal === 'string' && kvVal.startsWith('local:')) ? kvVal.slice(6) : null;
 
       const redirectUri = isLocal ? 'http://localhost:8787/oauth/callback' : 'https://rownative.icu/oauth/callback';
 
@@ -232,7 +235,7 @@ export default {
         expiresAt: 0, // no expiry
       };
       const cookie = await encryptSession(session, env.TOKEN_ENCRYPTION_KEY);
-      const postAuthRedirect = isLocal ? 'http://localhost:8080/' : '/';
+      const postAuthRedirect = (isLocal && returnTo) ? returnTo : (isLocal ? 'http://localhost:8080/' : '/');
       const headers = new Headers({ 'Location': postAuthRedirect });
       const cookieSecure = isLocal ? '' : '; Secure';
       headers.append('Set-Cookie', `rn_session=${cookie}; HttpOnly; SameSite=Lax; Path=/; Max-Age=7776000${cookieSecure}`);
@@ -245,10 +248,11 @@ export default {
     // OAuth logout
     if (path === '/oauth/logout') {
       const localParam = url.searchParams.get('local') === '1';
+      const returnTo = url.searchParams.get('return_to');
       const hostHeader = request.headers.get('Host') ?? '';
       const isLocal = localParam || hostHeader.startsWith('localhost') || hostHeader.startsWith('127.0.0.1')
         || url.hostname === 'localhost' || url.hostname === '127.0.0.1';
-      const logoutRedirect = isLocal ? 'http://localhost:8080/' : '/';
+      const logoutRedirect = (isLocal && returnTo) ? returnTo : (isLocal ? 'http://localhost:8080/' : '/');
       const logoutCookieSecure = isLocal ? '' : '; Secure';
       return new Response(null, {
         status: 302,
