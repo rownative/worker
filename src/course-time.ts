@@ -28,6 +28,11 @@ export interface CourseTimeResult {
   validationNote: string;
   startSecond?: number;
   endSecond?: number;
+  _debug?: {
+    exitTimesFromStart: number[];
+    records: Array<{ netTime: number; startS: number; endS: number; completed: boolean }>;
+    best: { netTime: number; startS: number; endS: number };
+  };
 }
 
 /** Ray-casting point-in-polygon. Polygon should be closed (implicit if first !== last). */
@@ -230,7 +235,7 @@ export function calculateCourseTime(
   course: Course,
   track: TrackPoint[],
   haversineFn: (a: { lat: number; lon: number }, b: { lat: number; lon: number }) => number,
-  options?: { log?: string[] }
+  options?: { log?: string[]; debug?: boolean }
 ): CourseTimeResult {
   const log = options?.log ?? [];
   const note: string[] = [];
@@ -290,6 +295,14 @@ export function calculateCourseTime(
   const best = completed.reduce((a, b) => (a.netTime < b.netTime ? a : b));
   const distanceM = course.distance_m ?? best.dist;
 
+  const debugPayload = options?.debug
+    ? {
+        exitTimesFromStart: entryTimes,
+        records: records.map((r) => ({ netTime: r.netTime, startS: r.startS, endS: r.endS, completed: r.completed })),
+        best: { netTime: best.netTime, startS: best.startS, endS: best.endS },
+      }
+    : undefined;
+
   // #region agent log
   try {
     fetch('http://127.0.0.1:7691/ingest/770bd333-f0c6-4569-b816-3db8bb63447a', {
@@ -319,5 +332,6 @@ export function calculateCourseTime(
     validationNote: note.join('\n'),
     startSecond: best.startS,
     endSecond: best.endS,
+    ...(debugPayload && { _debug: debugPayload }),
   };
 }
