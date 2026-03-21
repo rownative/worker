@@ -444,14 +444,19 @@ async function getAesKey(secret: string): Promise<CryptoKey> {
 
 // ── Import ZIP ─────────────────────────────────────────────────────────────────
 
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': 'https://rownative.icu',
-  'Access-Control-Allow-Credentials': 'true',
-};
+function corsHeaders(request: Request): Record<string, string> {
+  const origin = request.headers.get('Origin') ?? '';
+  const allowOrigin =
+    origin.includes('localhost') || origin.includes('127.0.0.1') ? origin : 'https://rownative.icu';
+  return {
+    'Access-Control-Allow-Origin': allowOrigin,
+    'Access-Control-Allow-Credentials': 'true',
+  };
+}
 
-function jsonResponse(body: object, status: number, withCors = false): Response {
+function jsonResponse(body: object, status: number, withCors = false, request?: Request): Response {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (withCors) Object.assign(headers, CORS_HEADERS);
+  if (withCors) Object.assign(headers, corsHeaders(request ?? new Request('http://x')));
   return new Response(JSON.stringify(body), { status, headers });
 }
 
@@ -936,7 +941,7 @@ async function handleCalculateTime(
     };
   }
 
-  return jsonResponse(payload, 200, true);
+  return jsonResponse(payload, 200, true, request);
 }
 
 async function handleSaveCourseTime(

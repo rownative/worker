@@ -264,7 +264,7 @@ export function calculateCourseTime(
   const records: Array<{ netTime: number; dist: number; completed: boolean; startS: number; endS: number }> = [];
 
   for (const startT of entryTimes) {
-    const sliceStart = Math.max(0, startT - 10);
+    const sliceStart = Math.max(0, startT - 0.2);
     const sliced = withDist.filter((p) => p.time >= sliceStart).map((p) => ({
       ...p,
       time: p.time - sliceStart,
