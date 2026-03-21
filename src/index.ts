@@ -123,6 +123,22 @@ export default {
       });
     }
 
+    // OAuth debug — show exact redirect_uri for copying into intervals.icu app settings
+    if (path === '/oauth/debug') {
+      const isLocal = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+      const redirectUri = isLocal
+        ? `${url.protocol}//${url.host}/oauth/callback`
+        : 'https://rownative.icu/oauth/callback';
+      return new Response(
+        JSON.stringify({
+          redirect_uri: redirectUri,
+          hint: 'Add this exact string to intervals.icu Developer Settings → Manage App → Redirect URIs',
+          request_url: url.href,
+        }, null, 2),
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
     // OAuth login — redirect to intervals.icu (with state for CSRF protection)
     // #region agent log
     if (path.startsWith('/oauth')) console.log(`[worker] oauth request path=${path} url=${url.href}`);
