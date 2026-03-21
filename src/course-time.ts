@@ -123,7 +123,8 @@ export function timeInPath(
 
 /**
  * Recursive: find first complete passage through gates in order.
- * Returns (endTime, distance, completed). For last gate uses exit time.
+ * finalMaxMin: 'max' = exit (when leaving polygon), 'min' = entry (when entering).
+ * For finish gate we use 'min' (entry) so time stops when bow crosses the line.
  */
 export function coursetimePaths(
   track: TrackPoint[],
@@ -274,7 +275,7 @@ export function calculateCourseTime(
       time: p.time - sliceStart,
     }));
     const polygons = course.polygons;
-    const pathsResult = coursetimePaths(sliced, polygons, 'max', log);
+    const pathsResult = coursetimePaths(sliced, polygons, 'min', log);
     const endS = pathsResult.time + sliceStart;
     const netTime = endS - startT;
     const dist = pathsResult.time > 0 ? (pathsResult.dist || 0) : 0;
