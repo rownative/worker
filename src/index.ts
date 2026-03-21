@@ -894,11 +894,25 @@ async function handleCalculateTime(
     track.push({ lat, lon, time: time[i] });
   }
 
+  // #region agent log
+  try {
+    const tMin = Math.min(...time.slice(0, len));
+    const tMax = Math.max(...time.slice(0, len));
+    fetch('http://127.0.0.1:7691/ingest/770bd333-f0c6-4569-b816-3db8bb63447a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1b1a2'},body:JSON.stringify({sessionId:'e1b1a2',location:'index.ts:track-built',message:'Track from intervals.icu',data:{courseId,activityId,points:len,timeMin:tMin,timeMax:tMax,timeFirst3:time.slice(0,3),timeLast3:time.slice(-3),latlngFirst:[latlng[0]],latlngLast:[latlng[len-1]]},timestamp:Date.now(),hypothesisId:'H1,H2,H5'})}).catch(()=>{});
+  } catch (_) {}
+  // #endregion
+
   const result = calculateCourseTime(
     course as { id: string; polygons: Array<{ name: string; order: number; points: Array<{ lat: number; lon: number }> }>; distance_m?: number },
     track,
     haversine
   );
+
+  // #region agent log
+  try {
+    fetch('http://127.0.0.1:7691/ingest/770bd333-f0c6-4569-b816-3db8bb63447a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1b1a2'},body:JSON.stringify({sessionId:'e1b1a2',location:'index.ts:result',message:'Course time result',data:{courseId,activityId,valid:result.valid,timeS:result.timeS,startSecond:result.startSecond,endSecond:result.endSecond,validationNote:result.validationNote?.slice(0,200)},timestamp:Date.now(),hypothesisId:'H3,H4'})}).catch(()=>{});
+  } catch (_) {}
+  // #endregion
 
   // Downsample latlng for map overlay (max ~600 points)
   const maxPoints = 600;
