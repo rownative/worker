@@ -1,0 +1,8 @@
+{
+  "redirect_uri": "https://rownative.icu/oauth/callback",
+  "hint": "Add this exact string to intervals.icu Developer Settings → Manage App → Redirect URIs",
+  "request_url": "http://rownative.icu/oauth/debug",
+  "host_header": "rownative.icu",
+  "is_local_by_host": false,
+  "is_local_by_url": false
+}
