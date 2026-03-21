@@ -125,22 +125,27 @@ export default {
 
     // OAuth login — redirect to intervals.icu (with state for CSRF protection)
     if (path === '/oauth/authorize') {
+      const isLocal = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+      const redirectUri = isLocal
+        ? `${url.protocol}//${url.host}/oauth/callback`
+        : 'https://rownative.icu/oauth/callback';
       const state = crypto.randomUUID();
-      console.log(`[oauth] authorize: generated state=${state}`);
+      console.log(`[oauth] authorize: generated state=${state}, redirect_uri=${redirectUri}`);
       // Store state in KV for iOS fallback (ASWebAuthenticationSession ephemeral mode doesn't persist cookies)
       await env.ROWING_COURSES.put(`oauth_state:${state}`, '1', { expirationTtl: 600 });
       const params = new URLSearchParams({
         client_id: env.INTERVALS_CLIENT_ID,
-        redirect_uri: 'https://rownative.icu/oauth/callback',
+        redirect_uri: redirectUri,
         response_type: 'code',
         scope: 'ACTIVITY:READ',
         state,
       });
+      const stateCookieSecure = isLocal ? '' : '; Secure';
       return new Response(null, {
         status: 302,
         headers: {
           'Location': `https://intervals.icu/oauth/authorize?${params}`,
-          'Set-Cookie': `rn_oauth_state=${state}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600`,
+          'Set-Cookie': `rn_oauth_state=${state}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600${stateCookieSecure}`,
         },
       });
     }
@@ -169,6 +174,11 @@ export default {
       // Consume one-time state (delete from KV if we used it)
       await env.ROWING_COURSES.delete(`oauth_state:${state}`);
 
+      const isLocal = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+      const redirectUri = isLocal
+        ? `${url.protocol}//${url.host}/oauth/callback`
+        : 'https://rownative.icu/oauth/callback';
+
       // Exchange code for tokens
       const tokenRes = await fetch('https://intervals.icu/api/oauth/token', {
         method: 'POST',
@@ -178,7 +188,7 @@ export default {
           client_secret: env.INTERVALS_CLIENT_SECRET,
           code,
           grant_type: 'authorization_code',
-          redirect_uri: 'https://rownative.icu/oauth/callback',
+          redirect_uri: redirectUri,
         }),
       });
       if (!tokenRes.ok) {
@@ -204,20 +214,26 @@ export default {
         expiresAt: 0, // no expiry
       };
       const cookie = await encryptSession(session, env.TOKEN_ENCRYPTION_KEY);
-      const headers = new Headers({ 'Location': '/' });
-      headers.append('Set-Cookie', `rn_session=${cookie}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=7776000`);
-      headers.append('Set-Cookie', 'rn_oauth_state=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0');
+      const postAuthRedirect = isLocal ? 'http://localhost:8080/' : '/';
+      const headers = new Headers({ 'Location': postAuthRedirect });
+      const cookieSecure = isLocal ? '' : '; Secure';
+      headers.append('Set-Cookie', `rn_session=${cookie}; HttpOnly; SameSite=Lax; Path=/; Max-Age=7776000${cookieSecure}`);
+      const clearStateSecure = isLocal ? '' : '; Secure';
+      headers.append('Set-Cookie', `rn_oauth_state=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${clearStateSecure}`);
 
       return new Response(null, { status: 302, headers });
     }
 
     // OAuth logout
     if (path === '/oauth/logout') {
+      const isLocal = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+      const logoutRedirect = isLocal ? 'http://localhost:8080/' : '/';
+      const logoutCookieSecure = isLocal ? '' : '; Secure';
       return new Response(null, {
         status: 302,
         headers: {
-          'Location': '/',
-          'Set-Cookie': 'rn_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0',
+          'Location': logoutRedirect,
+          'Set-Cookie': `rn_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${logoutCookieSecure}`,
         },
       });
     }
