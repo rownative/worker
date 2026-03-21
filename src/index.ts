@@ -124,6 +124,9 @@ export default {
     }
 
     // OAuth login — redirect to intervals.icu (with state for CSRF protection)
+    // #region agent log
+    if (path.startsWith('/oauth')) console.log(`[worker] oauth request path=${path} url=${url.href}`);
+    // #endregion
     if (path === '/oauth/authorize') {
       const isLocal = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
       const redirectUri = isLocal
@@ -324,6 +327,9 @@ export default {
       return result;
     }
 
+    // #region agent log
+    console.log(`[worker] 404 fallthrough path=${path} url=${url.href}`);
+    // #endregion
     return new Response('Not found', { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
