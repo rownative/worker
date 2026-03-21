@@ -271,16 +271,15 @@ export function calculateCourseTime(
     }));
     const polygons = course.polygons;
     const pathsResult = coursetimePaths(sliced, polygons, 'max', log);
-    const firstResult = coursetimeFirst(sliced, polygons);
-
-    const netTime = pathsResult.time - firstResult.time;
+    const endS = pathsResult.time + sliceStart;
+    const netTime = endS - startT;
     const dist = pathsResult.time > 0 ? (pathsResult.dist || 0) : 0;
     records.push({
       netTime,
       dist,
       completed: pathsResult.completed,
-      startS: firstResult.time + sliceStart,
-      endS: pathsResult.time + sliceStart,
+      startS: startT,
+      endS,
     });
     note.push(
       `Path starting at ${startT.toFixed(1)}s: completed=${pathsResult.completed}, net=${netTime.toFixed(1)}s`
