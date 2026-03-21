@@ -302,29 +302,6 @@ export function calculateCourseTime(
       }
     : undefined;
 
-  // #region agent log
-  try {
-    const logBody = JSON.stringify({
-      sessionId: 'e1b1a2',
-      location: 'course-time.ts:calculateCourseTime',
-      message: 'Gate crossings and net time',
-      data: {
-        courseId: course.id,
-        exitTimesFromStart: entryTimes,
-        records: records.map((r) => ({ netTime: r.netTime, startS: r.startS, endS: r.endS, completed: r.completed })),
-        best: { netTime: best.netTime, startS: best.startS, endS: best.endS },
-      },
-      timestamp: Date.now(),
-      hypothesisId: 'H3,H4',
-    });
-    fetch('http://127.0.0.1:7691/ingest/770bd333-f0c6-4569-b816-3db8bb63447a', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'e1b1a2' },
-      body: logBody,
-    }).catch(() => {});
-  } catch (_) {}
-  // #endregion
-
   return {
     valid: true,
     timeS: best.netTime,

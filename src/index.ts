@@ -300,17 +300,15 @@ export default {
     if (trackMatch && request.method === 'GET') {
       const activityId = trackMatch[1];
       const session = await getSessionFromRequest(request, env);
-      if (!session) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const result = await handleGetActivityTrack(activityId, session, env);
-      return result;
+      if (!session) return jsonResponse({ error: 'Unauthorised' }, 401, true, request);
+      return withCors(await handleGetActivityTrack(activityId, session, env), request);
     }
 
     // GET /api/me/activities — OTW rowing, last month
     if ((path === '/api/me/activities' || path === '/api/me/activities/') && request.method === 'GET') {
       const session = await getSessionFromRequest(request, env);
-      if (!session) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const result = await handleGetActivities(session, env);
-      return result;
+      if (!session) return jsonResponse({ error: 'Unauthorised' }, 401, true, request);
+      return withCors(await handleGetActivities(session, env), request);
     }
 
     // POST /api/courses/{id}/calculate-time
@@ -318,9 +316,8 @@ export default {
     if (calcMatch && request.method === 'POST') {
       const courseId = calcMatch[1];
       const session = await getSessionFromRequest(request, env);
-      if (!session) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const result = await handleCalculateTime(request, courseId, session, env);
-      return result;
+      if (!session) return jsonResponse({ error: 'Unauthorised' }, 401, true, request);
+      return withCors(await handleCalculateTime(request, courseId, session, env), request);
     }
 
     // POST /api/courses/{id}/course-times — save course time
@@ -328,17 +325,15 @@ export default {
     if (saveMatch && request.method === 'POST') {
       const courseId = saveMatch[1];
       const athleteId = await getAthleteIdFromRequest(request, env);
-      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const result = await handleSaveCourseTime(request, courseId, athleteId, env);
-      return result;
+      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true, request);
+      return withCors(await handleSaveCourseTime(request, courseId, athleteId, env), request);
     }
 
     // GET /api/me/course-times
     if ((path === '/api/me/course-times' || path === '/api/me/course-times/') && request.method === 'GET') {
       const athleteId = await getAthleteIdFromRequest(request, env);
-      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const result = await handleGetCourseTimes(athleteId, env);
-      return result;
+      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true, request);
+      return withCors(await handleGetCourseTimes(athleteId, env), request);
     }
 
     // DELETE /api/me/course-times/:id
@@ -346,9 +341,8 @@ export default {
     if (deleteMatch && request.method === 'DELETE') {
       const timeId = deleteMatch[1];
       const athleteId = await getAthleteIdFromRequest(request, env);
-      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const result = await handleDeleteCourseTime(timeId, athleteId, env);
-      return result;
+      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true, request);
+      return withCors(await handleDeleteCourseTime(timeId, athleteId, env), request);
     }
 
     return new Response('Not found', { status: 404 });
@@ -495,6 +489,15 @@ function corsHeaders(request: Request): Record<string, string> {
     'Access-Control-Allow-Origin': allowOrigin,
     'Access-Control-Allow-Credentials': 'true',
   };
+}
+
+/** Apply CORS headers to a response (for local dev when request has localhost Origin). */
+function withCors(res: Response, request: Request): Response {
+  const headers = new Headers(res.headers);
+  const cors = corsHeaders(request);
+  headers.set('Access-Control-Allow-Origin', cors['Access-Control-Allow-Origin']);
+  headers.set('Access-Control-Allow-Credentials', cors['Access-Control-Allow-Credentials']);
+  return new Response(res.body, { status: res.status, headers });
 }
 
 function jsonResponse(body: object, status: number, withCors = false, request?: Request): Response {
@@ -943,14 +946,6 @@ async function handleCalculateTime(
   }
 
   const debugMode = new URL(request.url).searchParams.get('debug') === '1';
-  const tMin = len > 0 ? Math.min(...time.slice(0, len)) : 0;
-  const tMax = len > 0 ? Math.max(...time.slice(0, len)) : 0;
-
-  // #region agent log
-  try {
-    fetch('http://127.0.0.1:7691/ingest/770bd333-f0c6-4569-b816-3db8bb63447a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1b1a2'},body:JSON.stringify({sessionId:'e1b1a2',location:'index.ts:track-built',message:'Track from intervals.icu',data:{courseId,activityId,points:len,timeMin:tMin,timeMax:tMax,timeFirst3:time.slice(0,3),timeLast3:time.slice(-3),latlngFirst:[latlng[0]],latlngLast:[latlng[len-1]]},timestamp:Date.now(),hypothesisId:'H1,H2,H5'})}).catch(()=>{});
-  } catch (_) {}
-  // #endregion
 
   const result = calculateCourseTime(
     course as { id: string; polygons: Array<{ name: string; order: number; points: Array<{ lat: number; lon: number }> }>; distance_m?: number },
@@ -958,12 +953,6 @@ async function handleCalculateTime(
     haversine,
     debugMode ? { debug: true } : undefined
   );
-
-  // #region agent log
-  try {
-    fetch('http://127.0.0.1:7691/ingest/770bd333-f0c6-4569-b816-3db8bb63447a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1b1a2'},body:JSON.stringify({sessionId:'e1b1a2',location:'index.ts:result',message:'Course time result',data:{courseId,activityId,valid:result.valid,timeS:result.timeS,startSecond:result.startSecond,endSecond:result.endSecond,validationNote:result.validationNote?.slice(0,200)},timestamp:Date.now(),hypothesisId:'H3,H4'})}).catch(()=>{});
-  } catch (_) {}
-  // #endregion
 
   // Downsample latlng for map overlay (max ~600 points)
   const maxPoints = 600;
