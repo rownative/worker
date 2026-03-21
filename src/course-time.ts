@@ -99,15 +99,19 @@ export function timeInPath(
   for (let i = 0; i < track.length - 1; i++) {
     const currInside = inPolygon[i];
     const nextInside = inPolygon[i + 1];
+    const tCross = (track[i].time + track[i + 1].time) / 2;
+    const d0 = (track[i] as TrackPoint & { cumdist?: number }).cumdist ?? 0;
+    const d1 = (track[i + 1] as TrackPoint & { cumdist?: number }).cumdist ?? 0;
+    const distCross = (d0 + d1) / 2;
     if (maxmin === 'max') {
       if (currInside && !nextInside) {
-        transitions.push(track[i].time);
-        dists.push((track[i] as TrackPoint & { cumdist?: number }).cumdist ?? 0);
+        transitions.push(tCross);
+        dists.push(distCross);
       }
     } else {
       if (!currInside && nextInside) {
-        transitions.push(track[i + 1].time);
-        dists.push((track[i + 1] as TrackPoint & { cumdist?: number }).cumdist ?? 0);
+        transitions.push(tCross);
+        dists.push(distCross);
       }
     }
   }

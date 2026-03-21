@@ -983,6 +983,8 @@ async function handleCalculateTime(
     latlng: latlngForMap,
   };
   if (debugMode) {
+    const tMin = len > 0 ? Math.min(...time.slice(0, len)) : 0;
+    const tMax = len > 0 ? Math.max(...time.slice(0, len)) : 0;
     payload._debug = {
       track: { points: len, timeMin: tMin, timeMax: tMax, timeFirst3: time.slice(0, 3), timeLast3: time.slice(-3), latlngFirst: latlng[0], latlngLast: latlng[len - 1] },
       gates: result._debug,
