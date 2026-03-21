@@ -894,10 +894,12 @@ async function handleCalculateTime(
     track.push({ lat, lon, time: time[i] });
   }
 
+  const debugMode = new URL(request.url).searchParams.get('debug') === '1';
+  const tMin = len > 0 ? Math.min(...time.slice(0, len)) : 0;
+  const tMax = len > 0 ? Math.max(...time.slice(0, len)) : 0;
+
   // #region agent log
   try {
-    const tMin = Math.min(...time.slice(0, len));
-    const tMax = Math.max(...time.slice(0, len));
     fetch('http://127.0.0.1:7691/ingest/770bd333-f0c6-4569-b816-3db8bb63447a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1b1a2'},body:JSON.stringify({sessionId:'e1b1a2',location:'index.ts:track-built',message:'Track from intervals.icu',data:{courseId,activityId,points:len,timeMin:tMin,timeMax:tMax,timeFirst3:time.slice(0,3),timeLast3:time.slice(-3),latlngFirst:[latlng[0]],latlngLast:[latlng[len-1]]},timestamp:Date.now(),hypothesisId:'H1,H2,H5'})}).catch(()=>{});
   } catch (_) {}
   // #endregion
@@ -905,7 +907,8 @@ async function handleCalculateTime(
   const result = calculateCourseTime(
     course as { id: string; polygons: Array<{ name: string; order: number; points: Array<{ lat: number; lon: number }> }>; distance_m?: number },
     track,
-    haversine
+    haversine,
+    debugMode ? { debug: true } : undefined
   );
 
   // #region agent log
@@ -919,17 +922,21 @@ async function handleCalculateTime(
   const step = latlng.length <= maxPoints ? 1 : Math.ceil(latlng.length / maxPoints);
   const latlngForMap = latlng.filter((_, i) => i % step === 0);
 
-  return jsonResponse(
-    {
-      valid: result.valid,
-      timeS: result.timeS,
-      distanceM: result.distanceM,
-      validationNote: result.validationNote,
-      latlng: latlngForMap,
-    },
-    200,
-    true
-  );
+  const payload: Record<string, unknown> = {
+    valid: result.valid,
+    timeS: result.timeS,
+    distanceM: result.distanceM,
+    validationNote: result.validationNote,
+    latlng: latlngForMap,
+  };
+  if (debugMode) {
+    payload._debug = {
+      track: { points: len, timeMin: tMin, timeMax: tMax, timeFirst3: time.slice(0, 3), timeLast3: time.slice(-3), latlngFirst: latlng[0], latlngLast: latlng[len - 1] },
+      gates: result._debug,
+    };
+  }
+
+  return jsonResponse(payload, 200, true);
 }
 
 async function handleSaveCourseTime(
