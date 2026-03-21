@@ -104,7 +104,8 @@ export function timeInPath(
     const distCross = (d0 + d1) / 2;
     if (maxmin === 'max') {
       if (currInside && !nextInside) {
-        const tCross = (track[i].time + track[i + 1].time) / 2;
+        // Rowsandall: use time of last inside point (df[b==2]['time'])
+        const tCross = track[i].time;
         transitions.push(tCross);
         dists.push(distCross);
       }
@@ -269,15 +270,18 @@ export function calculateCourseTime(
   const records: Array<{ netTime: number; dist: number; completed: boolean; startS: number; endS: number }> = [];
 
   for (const startT of entryTimes) {
-    const sliceStart = Math.max(0, startT - 0.2);
+    // Rowsandall uses startt-10s buffer; 10s is safe for gate detection
+    const sliceStart = Math.max(0, startT - 10);
     const sliced = withDist.filter((p) => p.time >= sliceStart).map((p) => ({
       ...p,
       time: p.time - sliceStart,
     }));
     const polygons = course.polygons;
     const pathsResult = coursetimePaths(sliced, polygons, 'min', log);
+    const firstResult = coursetimeFirst(sliced, polygons);
+    // Rowsandall: net = coursetime_paths - coursetime_first
+    const netTime = pathsResult.time - firstResult.time;
     const endS = pathsResult.time + sliceStart;
-    const netTime = endS - startT;
     const dist = pathsResult.time > 0 ? (pathsResult.dist || 0) : 0;
     records.push({
       netTime,
