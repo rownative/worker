@@ -899,6 +899,7 @@ async function handleCalculateTime(
     track,
     haversine
   );
+
   // Downsample latlng for map overlay (max ~600 points)
   const maxPoints = 600;
   const step = latlng.length <= maxPoints ? 1 : Math.ceil(latlng.length / maxPoints);
@@ -924,7 +925,7 @@ async function handleSaveCourseTime(
   env: Env
 ): Promise<Response> {
   if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
-  let body: { activityId: string; timeS: number; distanceM: number; validationNote?: string; workoutDate?: string };
+  let body: { activityId: string; timeS: number; distanceM: number; validationNote?: string; workoutDate?: string; workoutName?: string };
   try {
     body = (await request.json()) as {
       activityId: string;
@@ -932,29 +933,32 @@ async function handleSaveCourseTime(
       distanceM: number;
       validationNote?: string;
       workoutDate?: string;
+      workoutName?: string;
     };
   } catch {
     return jsonResponse({ error: 'Invalid JSON body' }, 400, true);
   }
-  const { activityId, timeS, distanceM, validationNote = '', workoutDate } = body;
+  const { activityId, timeS, distanceM, validationNote = '', workoutDate, workoutName } = body;
   if (!activityId || typeof timeS !== 'number' || typeof distanceM !== 'number') {
     return jsonResponse({ error: 'activityId, timeS, distanceM required' }, 400, true);
   }
   const id = crypto.randomUUID();
   const createdAt = new Date().toISOString();
   const wd = workoutDate && /^\d{4}-\d{2}-\d{2}/.test(workoutDate) ? workoutDate.slice(0, 10) : null;
+  const wn = (workoutName && String(workoutName).trim()) || null;
   try {
     await env.DB.prepare(
-      `INSERT INTO course_times (id, athlete_id, activity_id, course_id, time_s, distance_m, validation_note, created_at, workout_date)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO course_times (id, athlete_id, activity_id, course_id, time_s, distance_m, validation_note, created_at, workout_date, workout_name)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(athlete_id, activity_id, course_id) DO UPDATE SET
          time_s = excluded.time_s,
          distance_m = excluded.distance_m,
          validation_note = excluded.validation_note,
          created_at = excluded.created_at,
-         workout_date = excluded.workout_date`
+         workout_date = excluded.workout_date,
+         workout_name = excluded.workout_name`
     )
-      .bind(id, athleteId, activityId, courseId, timeS, distanceM, validationNote || '', createdAt, wd)
+      .bind(id, athleteId, activityId, courseId, timeS, distanceM, validationNote || '', createdAt, wd, wn)
       .run();
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Database error';
@@ -969,7 +973,7 @@ async function handleGetCourseTimes(athleteId: string, env: Env): Promise<Respon
     let results: Record<string, unknown>[];
     try {
       const r = await env.DB.prepare(
-        `SELECT id, activity_id, course_id, time_s, distance_m, validation_note, created_at, workout_date
+        `SELECT id, activity_id, course_id, time_s, distance_m, validation_note, created_at, workout_date, workout_name
          FROM course_times WHERE athlete_id = ? ORDER BY COALESCE(workout_date, created_at) DESC`
       )
         .bind(athleteId)
@@ -977,7 +981,15 @@ async function handleGetCourseTimes(athleteId: string, env: Env): Promise<Respon
       results = r.results ?? [];
     } catch (colErr) {
       const errMsg = colErr instanceof Error ? colErr.message : String(colErr);
-      if (errMsg.includes('no such column') && errMsg.includes('workout_date')) {
+      if (errMsg.includes('no such column') && errMsg.includes('workout_name')) {
+        const r = await env.DB.prepare(
+          `SELECT id, activity_id, course_id, time_s, distance_m, validation_note, created_at, workout_date
+           FROM course_times WHERE athlete_id = ? ORDER BY COALESCE(workout_date, created_at) DESC`
+        )
+          .bind(athleteId)
+          .all();
+        results = r.results ?? [];
+      } else if (errMsg.includes('no such column') && errMsg.includes('workout_date')) {
         const r = await env.DB.prepare(
           `SELECT id, activity_id, course_id, time_s, distance_m, validation_note, created_at
            FROM course_times WHERE athlete_id = ? ORDER BY created_at DESC`

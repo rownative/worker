@@ -20,6 +20,10 @@ Look for `rowing-courses-db`. If it appears with a real UUID, the DB exists and 
 
 ### Migrations
 
+Migrations live in `migrations/`:
+- `0001_course_times.sql` — creates `course_times` table
+- `0002_course_times_workout_date.sql` — adds `workout_date` column (workout date, not calculation date)
+
 - **Local** (dev): `migrations apply` defaults to local. Migrations run automatically when using `npx wrangler dev`.
 - **Remote** (production): Use `--remote`:
 
