@@ -17,6 +17,22 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    // CORS preflight — required for credentialed POST from localhost
+    if (request.method === 'OPTIONS') {
+      const origin = request.headers.get('Origin') ?? '';
+      const allowOrigin = origin.includes('localhost') || origin.includes('127.0.0.1') ? origin : 'https://rownative.icu';
+      return new Response(null, {
+        status: 204,
+        headers: {
+          'Access-Control-Allow-Origin': allowOrigin,
+          'Access-Control-Allow-Credentials': 'true',
+          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+          'Access-Control-Max-Age': '86400',
+        },
+      });
+    }
+
     // Course index (optional geo filter: ?lat=&lon=&radius=)
     if (path === '/api/courses/' || path === '/api/courses') {
       const latVal = url.searchParams.get('lat');
