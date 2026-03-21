@@ -125,15 +125,21 @@ export default {
 
     // OAuth debug — show exact redirect_uri for copying into intervals.icu app settings
     if (path === '/oauth/debug') {
-      const isLocal = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+      const hostHeader = request.headers.get('Host') ?? '';
+      const isLocalByHost = hostHeader.startsWith('localhost') || hostHeader.startsWith('127.0.0.1');
+      const isLocalByUrl = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+      const isLocal = isLocalByHost || isLocalByUrl;
       const redirectUri = isLocal
-        ? `${url.protocol}//${url.host}/oauth/callback`
+        ? `http://${hostHeader || url.host}/oauth/callback`
         : 'https://rownative.icu/oauth/callback';
       return new Response(
         JSON.stringify({
           redirect_uri: redirectUri,
           hint: 'Add this exact string to intervals.icu Developer Settings → Manage App → Redirect URIs',
           request_url: url.href,
+          host_header: hostHeader,
+          is_local_by_host: isLocalByHost,
+          is_local_by_url: isLocalByUrl,
         }, null, 2),
         { headers: { 'Content-Type': 'application/json' } }
       );
@@ -144,9 +150,11 @@ export default {
     if (path.startsWith('/oauth')) console.log(`[worker] oauth request path=${path} url=${url.href}`);
     // #endregion
     if (path === '/oauth/authorize') {
-      const isLocal = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+      const hostHeader = request.headers.get('Host') ?? '';
+      const isLocal = hostHeader.startsWith('localhost') || hostHeader.startsWith('127.0.0.1')
+        || url.hostname === 'localhost' || url.hostname === '127.0.0.1';
       const redirectUri = isLocal
-        ? `${url.protocol}//${url.host}/oauth/callback`
+        ? `http://${hostHeader || url.host}/oauth/callback`
         : 'https://rownative.icu/oauth/callback';
       const state = crypto.randomUUID();
       console.log(`[oauth] authorize: generated state=${state}, redirect_uri=${redirectUri}`);
@@ -193,9 +201,11 @@ export default {
       // Consume one-time state (delete from KV if we used it)
       await env.ROWING_COURSES.delete(`oauth_state:${state}`);
 
-      const isLocal = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+      const hostHeader = request.headers.get('Host') ?? '';
+      const isLocal = hostHeader.startsWith('localhost') || hostHeader.startsWith('127.0.0.1')
+        || url.hostname === 'localhost' || url.hostname === '127.0.0.1';
       const redirectUri = isLocal
-        ? `${url.protocol}//${url.host}/oauth/callback`
+        ? `http://${hostHeader || url.host}/oauth/callback`
         : 'https://rownative.icu/oauth/callback';
 
       // Exchange code for tokens
@@ -245,7 +255,9 @@ export default {
 
     // OAuth logout
     if (path === '/oauth/logout') {
-      const isLocal = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+      const hostHeader = request.headers.get('Host') ?? '';
+      const isLocal = hostHeader.startsWith('localhost') || hostHeader.startsWith('127.0.0.1')
+        || url.hostname === 'localhost' || url.hostname === '127.0.0.1';
       const logoutRedirect = isLocal ? 'http://localhost:8080/' : '/';
       const logoutCookieSecure = isLocal ? '' : '; Secure';
       return new Response(null, {
