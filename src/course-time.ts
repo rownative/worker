@@ -99,15 +99,20 @@ export function timeInPath(
   for (let i = 0; i < track.length - 1; i++) {
     const currInside = inPolygon[i];
     const nextInside = inPolygon[i + 1];
+    const d0 = (track[i] as TrackPoint & { cumdist?: number }).cumdist ?? 0;
+    const d1 = (track[i + 1] as TrackPoint & { cumdist?: number }).cumdist ?? 0;
+    const distCross = (d0 + d1) / 2;
     if (maxmin === 'max') {
       if (currInside && !nextInside) {
-        transitions.push(track[i].time);
-        dists.push((track[i] as TrackPoint & { cumdist?: number }).cumdist ?? 0);
+        // Rowsandall: use time of last inside point (df[b==2]['time'])
+        const tCross = track[i].time;
+        transitions.push(tCross);
+        dists.push(distCross);
       }
     } else {
       if (!currInside && nextInside) {
         transitions.push(track[i + 1].time);
-        dists.push((track[i + 1] as TrackPoint & { cumdist?: number }).cumdist ?? 0);
+        dists.push(distCross);
       }
     }
   }
@@ -119,7 +124,8 @@ export function timeInPath(
 
 /**
  * Recursive: find first complete passage through gates in order.
- * Returns (endTime, distance, completed). For last gate uses exit time.
+ * finalMaxMin: 'max' = exit (when leaving polygon), 'min' = entry (when entering).
+ * For finish gate we use 'min' (entry) so time stops when bow crosses the line.
  */
 export function coursetimePaths(
   track: TrackPoint[],
@@ -264,23 +270,25 @@ export function calculateCourseTime(
   const records: Array<{ netTime: number; dist: number; completed: boolean; startS: number; endS: number }> = [];
 
   for (const startT of entryTimes) {
+    // Rowsandall uses startt-10s buffer; 10s is safe for gate detection
     const sliceStart = Math.max(0, startT - 10);
     const sliced = withDist.filter((p) => p.time >= sliceStart).map((p) => ({
       ...p,
       time: p.time - sliceStart,
     }));
     const polygons = course.polygons;
-    const pathsResult = coursetimePaths(sliced, polygons, 'max', log);
+    const pathsResult = coursetimePaths(sliced, polygons, 'min', log);
     const firstResult = coursetimeFirst(sliced, polygons);
-
+    // Rowsandall: net = coursetime_paths - coursetime_first
     const netTime = pathsResult.time - firstResult.time;
+    const endS = pathsResult.time + sliceStart;
     const dist = pathsResult.time > 0 ? (pathsResult.dist || 0) : 0;
     records.push({
       netTime,
       dist,
       completed: pathsResult.completed,
-      startS: firstResult.time + sliceStart,
-      endS: pathsResult.time + sliceStart,
+      startS: startT,
+      endS,
     });
     note.push(
       `Path starting at ${startT.toFixed(1)}s: completed=${pathsResult.completed}, net=${netTime.toFixed(1)}s`
@@ -302,29 +310,6 @@ export function calculateCourseTime(
         best: { netTime: best.netTime, startS: best.startS, endS: best.endS },
       }
     : undefined;
-
-  // #region agent log
-  try {
-    const logBody = JSON.stringify({
-      sessionId: 'e1b1a2',
-      location: 'course-time.ts:calculateCourseTime',
-      message: 'Gate crossings and net time',
-      data: {
-        courseId: course.id,
-        exitTimesFromStart: entryTimes,
-        records: records.map((r) => ({ netTime: r.netTime, startS: r.startS, endS: r.endS, completed: r.completed })),
-        best: { netTime: best.netTime, startS: best.startS, endS: best.endS },
-      },
-      timestamp: Date.now(),
-      hypothesisId: 'H3,H4',
-    });
-    fetch('http://127.0.0.1:7691/ingest/770bd333-f0c6-4569-b816-3db8bb63447a', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'e1b1a2' },
-      body: logBody,
-    }).catch(() => {});
-  } catch (_) {}
-  // #endregion
 
   return {
     valid: true,
