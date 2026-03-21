@@ -99,10 +99,12 @@ export default {
       const payload = athleteId
         ? { athleteId, liked: JSON.parse((await env.ROWING_COURSES.get(`liked:${athleteId}`)) ?? '[]') }
         : { athleteId: null, liked: [] };
+      const origin = request.headers.get('Origin') ?? '';
+      const allowOrigin = origin.includes('localhost') || origin.includes('127.0.0.1') ? origin : 'https://rownative.icu';
       return new Response(JSON.stringify(payload), {
         headers: {
           'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': 'https://rownative.icu',
+          'Access-Control-Allow-Origin': allowOrigin,
           'Access-Control-Allow-Credentials': 'true',
         },
       });
