@@ -14,7 +14,7 @@ describe('content-filter', () => {
   });
 
   it('allows clean names', () => {
-    expect(isNameAllowed('Gingerbread Girls Quad')).toEqual({ allowed: true });
+    expect(isNameAllowed('Charles River Four')).toEqual({ allowed: true });
     expect(isNameAllowed('Charles River Rowing Club')).toEqual({ allowed: true });
     expect(isNameAllowed('Spring 2025 Challenge')).toEqual({ allowed: true });
   });
