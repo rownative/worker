@@ -1571,6 +1571,29 @@ function parseStandardTime(val: string): number | null {
   return null;
 }
 
+/** Map Rowsandall CSV gender to M/F/X: Open->M, Female->F, mixed->X */
+function mapCsvSex(val: string): string {
+  const v = String(val || '').trim().toLowerCase();
+  if (v === 'female') return 'F';
+  if (v === 'mixed') return 'X';
+  if (v === 'open') return 'M';
+  return (v.slice(0, 1).toUpperCase() || 'M') as string;
+}
+
+/** Map Rowsandall CSV weight class: open-weight -> HWT, lightweight -> LWT */
+function mapCsvWeightClass(val: string): string {
+  const v = String(val || '').trim().toLowerCase();
+  if (v === 'open-weight' || v === 'openweight') return 'HWT';
+  if (v === 'lightweight' || v === 'lwt') return 'LWT';
+  return v ? v.toUpperCase().slice(0, 3) : 'HWT';
+}
+
+/** Parse age from CSV cell (integer or null) */
+function parseCsvAge(val: string): number | null {
+  const n = parseInt(String(val || '').trim(), 10);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
 async function handleCreateStandardCollection(request: Request, athleteId: string, env: Env): Promise<Response> {
   if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
   const contentType = request.headers.get('Content-Type') ?? '';
@@ -1613,24 +1636,32 @@ async function handleCreateStandardCollection(request: Request, athleteId: strin
     const header = lines[0]?.toLowerCase() ?? '';
     const cols = header.split(/[,\t]/).map((c) => c.trim().toLowerCase());
     const boatIdx = cols.findIndex((c) => c.includes('boattype') || c === 'boattype' || c === 'boat_class');
-    const sexIdx = cols.findIndex((c) => c === 'sex');
+    const sexIdx = cols.findIndex((c) => c === 'sex' || c === 'gender');
     const wcIdx = cols.findIndex((c) => c.includes('weight') || c === 'weightclass');
     const timeIdx = cols.findIndex((c) => c.includes('coursetime') || c.includes('standard') || c === 'time');
     const distIdx = cols.findIndex((c) => c.includes('coursedistance') || c === 'distance');
+    const ageMinIdx = cols.findIndex((c) => c === 'agemin' || c === 'ageminimum' || c === 'minimum age' || (c.includes('age') && c.includes('min')));
+    const ageMaxIdx = cols.findIndex((c) => c === 'agemax' || c === 'agemaximum' || c === 'maximum age' || (c.includes('age') && c.includes('max')));
     for (let i = 1; i < lines.length; i++) {
       const cells = lines[i].split(/[,\t]/).map((c) => c.trim());
       const boatType = (boatIdx >= 0 ? cells[boatIdx] : '1x') || '1x';
-      const sex = (sexIdx >= 0 ? cells[sexIdx] : 'M')?.toUpperCase().slice(0, 1) || 'M';
-      const weightClass = (wcIdx >= 0 ? cells[wcIdx] : 'HWT') || 'HWT';
+      const sexRaw = (sexIdx >= 0 ? cells[sexIdx] : 'M') || 'M';
+      const sex = mapCsvSex(sexRaw);
+      const wcRaw = (wcIdx >= 0 ? cells[wcIdx] : 'HWT') || 'HWT';
+      const weightClass = mapCsvWeightClass(wcRaw);
       const timeS = parseStandardTime(timeIdx >= 0 ? cells[timeIdx] : '');
       const distM = distIdx >= 0 ? parseFloat(cells[distIdx] || '') : NaN;
       const courseDistanceM = Number.isFinite(distM) && distM > 0 ? distM : 500;
+      const ageMin = ageMinIdx >= 0 ? parseCsvAge(cells[ageMinIdx]) : -1;
+      const ageMax = ageMaxIdx >= 0 ? parseCsvAge(cells[ageMaxIdx]) : 999;
+      const ageMinVal = ageMin != null && ageMin >= 0 ? ageMin : -1;
+      const ageMaxVal = ageMax != null && ageMax >= 0 ? ageMax : 999;
       if (timeS != null && timeS > 0) {
         try {
           await env.DB.prepare(
-            'INSERT OR REPLACE INTO course_standards (collection_id, boat_type, sex, weight_class, course_distance_m, standard_time_s) VALUES (?, ?, ?, ?, ?, ?)'
+            'INSERT OR REPLACE INTO course_standards (collection_id, boat_type, sex, weight_class, age_min, age_max, course_distance_m, standard_time_s) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
           )
-            .bind(id, boatType, sex, weightClass, courseDistanceM, timeS)
+            .bind(id, boatType, sex, weightClass, ageMinVal, ageMaxVal, courseDistanceM, timeS)
             .run();
         } catch {
           // skip row on error
@@ -1903,21 +1934,35 @@ async function handleChallengeSubmit(
   if (hasHandicap && (!boatType || !sex)) {
     return jsonResponse({ error: 'boatType and sex required for handicap challenges' }, 400, true);
   }
-  const categoryKey = hasHandicap
+  let categoryKey = hasHandicap
     ? (boatType || '') + '|' + (sex || '') + '|' + (weightClass || '')
     : 'raw';
   let correctedTimeS = result.timeS;
   let points: number | null = null;
   if (collectionId && boatType && sex) {
+    const builtin = ['hocr', 'fisa', 'charles'];
+    if (!builtin.includes(collectionId.toLowerCase()) && env.DB) {
+      const ageAgnostic = await env.DB.prepare(
+        'SELECT 1 FROM course_standards WHERE collection_id = ? AND age_min = -1 AND age_max = 999 LIMIT 1'
+      )
+        .bind(collectionId)
+        .first();
+      if (!ageAgnostic && crewAvgAge == null) {
+        return jsonResponse({ error: 'crewAvgAge required for this handicap collection' }, 400, true);
+      }
+    }
     const courseDistanceM = (typeof course.distance_m === 'number' && course.distance_m > 0 ? course.distance_m : result.distanceM) || undefined;
     const handicap = await computeHandicap(
       collectionId,
-      { rawTimeS: result.timeS, boatType, sex, weightClass: weightClass ?? undefined, courseDistanceM },
+      { rawTimeS: result.timeS, boatType, sex, weightClass: weightClass ?? undefined, courseDistanceM, crewAvgAge: crewAvgAge ?? undefined },
       env.DB
     );
     if (handicap) {
       correctedTimeS = handicap.correctedTimeS;
       points = handicap.points;
+      if (handicap.ageBand) {
+        categoryKey = (boatType || '') + '|' + (sex || '') + '|' + (weightClass || '') + '|' + handicap.ageBand;
+      }
     }
   }
 

@@ -12,11 +12,15 @@ export interface HandicapInput {
   weightClass?: string;
   /** Challenge course distance (m). Required for points; used for velo. */
   courseDistanceM?: number;
+  /** Average crew age for age-band lookup. When standards have age bands, used to match narrowest band. */
+  crewAvgAge?: number;
 }
 
 export interface HandicapResult {
   correctedTimeS: number;
   points: number;
+  /** Matched age band e.g. "27-120" when lookup used age-band standard. For category_key. */
+  ageBand?: string;
 }
 
 /** Built-in standard times (seconds) for 500m. Reference: M1x HWT = 420s. */
@@ -117,26 +121,51 @@ export async function computeHandicap(
 
   const builtin = ['hocr', 'fisa', 'charles'];
   let courseDistanceStd = 500;
+  let ageBand: string | undefined;
+  const bt = input.boatType.trim();
+  const sx = input.sex.trim().toUpperCase().slice(0, 1);
   if (builtin.includes(collectionId.toLowerCase())) {
     standardS = lookupBuiltin(collectionId, input.boatType, input.sex, wc);
   } else if (db) {
-    const row = await db
-      .prepare(
-        'SELECT standard_time_s, course_distance_m FROM course_standards WHERE collection_id = ? AND boat_type = ? AND sex = ? AND weight_class = ?'
-      )
-      .bind(collectionId, input.boatType.trim(), input.sex.trim().toUpperCase().slice(0, 1), wc)
-      .first();
-    if (row) {
-      const r = row as { standard_time_s: number; course_distance_m?: number };
-      standardS = r.standard_time_s;
-      courseDistanceStd = r.course_distance_m ?? 500;
+    const age = input.crewAvgAge;
+    if (age != null && Number.isInteger(age) && age >= 8 && age <= 120) {
+      const ageRow = await db
+        .prepare(
+          `SELECT standard_time_s, course_distance_m, age_min, age_max
+           FROM course_standards WHERE collection_id = ? AND boat_type = ? AND sex = ? AND weight_class = ?
+             AND (age_min = -1 OR age_min <= ?) AND (age_max = 999 OR age_max >= ?)
+           ORDER BY (age_max - age_min) ASC LIMIT 1`
+        )
+        .bind(collectionId, bt, sx, wc, age, age)
+        .first();
+      if (ageRow) {
+        const r = ageRow as { standard_time_s: number; course_distance_m?: number; age_min: number; age_max: number };
+        standardS = r.standard_time_s;
+        courseDistanceStd = r.course_distance_m ?? 500;
+        if (r.age_min !== -1 || r.age_max !== 999) {
+          ageBand = `${r.age_min}-${r.age_max}`;
+        }
+      }
+    }
+    if (standardS == null) {
+      const row = await db
+        .prepare(
+          'SELECT standard_time_s, course_distance_m FROM course_standards WHERE collection_id = ? AND boat_type = ? AND sex = ? AND weight_class = ? AND age_min = -1 AND age_max = 999'
+        )
+        .bind(collectionId, bt, sx, wc)
+        .first();
+      if (row) {
+        const r = row as { standard_time_s: number; course_distance_m?: number };
+        standardS = r.standard_time_s;
+        courseDistanceStd = r.course_distance_m ?? 500;
+      }
     }
     if (standardS == null) {
       const fallback = await db
         .prepare(
-          'SELECT standard_time_s, course_distance_m FROM course_standards WHERE collection_id = ? AND boat_type = ? AND sex = ? AND weight_class = ?'
+          'SELECT standard_time_s, course_distance_m FROM course_standards WHERE collection_id = ? AND boat_type = ? AND sex = ? AND weight_class = ? AND age_min = -1 AND age_max = 999'
         )
-        .bind(collectionId, input.boatType.trim(), input.sex.trim().toUpperCase().slice(0, 1), 'HWT')
+        .bind(collectionId, bt, sx, 'HWT')
         .first();
       if (fallback) {
         const f = fallback as { standard_time_s: number; course_distance_m?: number };
@@ -159,5 +188,5 @@ export async function computeHandicap(
   const velo = courseDistanceM / raw;
   const points = 100 * (2 - referenceSpeed / velo);
 
-  return { correctedTimeS, points };
+  return { correctedTimeS, points, ageBand };
 }
