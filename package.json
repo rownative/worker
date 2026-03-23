@@ -4,6 +4,7 @@
 	"private": true,
 	"scripts": {
 		"deploy": "wrangler deploy",
+		"predev": "wrangler d1 migrations apply rowing-courses-db --local",
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
 		"test": "vitest run",

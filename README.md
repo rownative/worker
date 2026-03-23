@@ -114,7 +114,7 @@ npx wrangler d1 create rowing-courses-db
 npx wrangler d1 migrations apply rowing-courses-db --remote
 ```
 
-Local development uses an ephemeral D1 instance; migrations run automatically.
+For local dev, run `npx wrangler d1 migrations apply rowing-courses-db --local` before `npm run dev` (or let `npm run dev` do it automatically).
 
 ### 4. Secrets
 
