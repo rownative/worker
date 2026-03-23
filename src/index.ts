@@ -421,70 +421,63 @@ export default {
     // GET /api/organiser/challenges
     if ((path === '/api/organiser/challenges' || path === '/api/organiser/challenges/') && request.method === 'GET') {
       const athleteId = await getAthleteIdFromRequest(request, env);
-      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const result = await handleOrganiserChallengesList(athleteId, env);
-      return result;
+      if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
+      return withCors(await handleOrganiserChallengesList(athleteId, env), request);
     }
 
     // POST /api/organiser/challenges
     if ((path === '/api/organiser/challenges' || path === '/api/organiser/challenges/') && request.method === 'POST') {
       const athleteId = await getAthleteIdFromRequest(request, env);
-      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
       const isOrg = await isOrganizer(athleteId, env, request);
-      if (!isOrg) return jsonResponse({ error: 'Organiser access required' }, 403, true);
-      const result = await handleCreateChallenge(request, athleteId, env, ctx);
-      return result;
+      if (!isOrg) return withCors(jsonResponse({ error: 'Organiser access required' }, 403, true), request);
+      return withCors(await handleCreateChallenge(request, athleteId, env, ctx), request);
     }
 
     // GET /api/organiser/standard-collections
     if ((path === '/api/organiser/standard-collections' || path === '/api/organiser/standard-collections/') && request.method === 'GET') {
       const athleteId = await getAthleteIdFromRequest(request, env);
-      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const result = await handleListStandardCollections(env);
-      return result;
+      if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
+      return withCors(await handleListStandardCollections(env), request);
     }
 
     // POST /api/organiser/standard-collections
     if ((path === '/api/organiser/standard-collections' || path === '/api/organiser/standard-collections/') && request.method === 'POST') {
       const athleteId = await getAthleteIdFromRequest(request, env);
-      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
       const isOrg = await isOrganizer(athleteId, env, request);
-      if (!isOrg) return jsonResponse({ error: 'Organiser access required' }, 403, true);
-      const result = await handleCreateStandardCollection(request, athleteId, env);
-      return result;
+      if (!isOrg) return withCors(jsonResponse({ error: 'Organiser access required' }, 403, true), request);
+      return withCors(await handleCreateStandardCollection(request, athleteId, env), request);
     }
 
     // GET /api/organiser/challenges/:id/results — all results including pending (organiser only)
     const organiserResultsMatch = path.match(/^\/api\/organiser\/challenges\/([^/]+)\/results\/?$/);
     if (organiserResultsMatch && request.method === 'GET') {
       const athleteId = await getAthleteIdFromRequest(request, env);
-      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
       const isOrg = await isOrganizer(athleteId, env, request);
-      if (!isOrg) return jsonResponse({ error: 'Organiser access required' }, 403, true);
-      const result = await handleOrganiserChallengeResults(organiserResultsMatch[1], athleteId, env);
-      return result;
+      if (!isOrg) return withCors(jsonResponse({ error: 'Organiser access required' }, 403, true), request);
+      return withCors(await handleOrganiserChallengeResults(organiserResultsMatch[1], athleteId, env), request);
     }
 
     // POST /api/organiser/results/:id/override — approve or disqualify
     const organiserOverrideMatch = path.match(/^\/api\/organiser\/results\/([^/]+)\/override\/?$/);
     if (organiserOverrideMatch && request.method === 'POST') {
       const athleteId = await getAthleteIdFromRequest(request, env);
-      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
       const isOrg = await isOrganizer(athleteId, env, request);
-      if (!isOrg) return jsonResponse({ error: 'Organiser access required' }, 403, true);
-      const result = await handleOrganiserResultOverride(request, organiserOverrideMatch[1], athleteId, env);
-      return result;
+      if (!isOrg) return withCors(jsonResponse({ error: 'Organiser access required' }, 403, true), request);
+      return withCors(await handleOrganiserResultOverride(request, organiserOverrideMatch[1], athleteId, env), request);
     }
 
     // GET /api/organiser/results/:id/track — track overlay for moderation
     const organiserTrackMatch = path.match(/^\/api\/organiser\/results\/([^/]+)\/track\/?$/);
     if (organiserTrackMatch && request.method === 'GET') {
       const athleteId = await getAthleteIdFromRequest(request, env);
-      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+      if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
       const isOrg = await isOrganizer(athleteId, env, request);
-      if (!isOrg) return jsonResponse({ error: 'Organiser access required' }, 403, true);
-      const result = await handleOrganiserResultTrack(organiserTrackMatch[1], athleteId, env);
-      return result;
+      if (!isOrg) return withCors(jsonResponse({ error: 'Organiser access required' }, 403, true), request);
+      return withCors(await handleOrganiserResultTrack(organiserTrackMatch[1], athleteId, env), request);
     }
 
     return new Response('Not found', { status: 404 });
@@ -1498,12 +1491,12 @@ async function handleOrganiserChallengesList(athleteId: string, env: Env): Promi
 
 async function handleCreateChallenge(request: Request, athleteId: string, env: Env, ctx?: ExecutionContext): Promise<Response> {
   try {
-    if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+    if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true, request);
     let body: { name?: string; courseId?: string; rowStart?: string; rowEnd?: string; submitEnd?: string; collectionId?: string; notes?: string; isPublic?: boolean };
     try {
       body = (await request.json()) as typeof body;
     } catch {
-      return jsonResponse({ error: 'Invalid JSON body' }, 400, true);
+      return jsonResponse({ error: 'Invalid JSON body' }, 400, true, request);
     }
     const name = body.name?.trim();
     const courseId = body.courseId ? String(body.courseId) : null;
@@ -1511,11 +1504,11 @@ async function handleCreateChallenge(request: Request, athleteId: string, env: E
     const rowEnd = body.rowEnd ? String(body.rowEnd).slice(0, 19) : null;
     const submitEnd = body.submitEnd ? String(body.submitEnd).slice(0, 19) : null;
     if (!name || !courseId || !rowStart || !rowEnd || !submitEnd) {
-      return jsonResponse({ error: 'name, courseId, rowStart, rowEnd, submitEnd required' }, 400, true);
+      return jsonResponse({ error: 'name, courseId, rowStart, rowEnd, submitEnd required' }, 400, true, request);
     }
     const nameCheck = isNameAllowed(name);
     if (!nameCheck.allowed) {
-      return jsonResponse({ error: nameCheck.reason ?? "That name isn't allowed." }, 400, true);
+      return jsonResponse({ error: nameCheck.reason ?? "That name isn't allowed." }, 400, true, request);
     }
     const collectionId = body.collectionId ? String(body.collectionId).trim() || null : null;
     const notes = body.notes?.trim() || null;
@@ -1531,7 +1524,7 @@ async function handleCreateChallenge(request: Request, athleteId: string, env: E
         .run();
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Database error';
-      return jsonResponse({ error: msg }, 500, true);
+      return jsonResponse({ error: msg }, 500, true, request);
     }
     const courses = await getCourseIndex(env);
     const customColls = await loadCollectionNames(env);
@@ -1545,10 +1538,10 @@ async function handleCreateChallenge(request: Request, athleteId: string, env: E
       ctx.waitUntil(notifyAdminsNewChallenge(env, { id, name, courseId, rowStart, rowEnd, submitEnd, athleteId }));
     }
 
-    return jsonResponse({ id, challenge }, 200, true);
+    return jsonResponse({ id, challenge }, 200, true, request);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    return jsonResponse({ error: msg }, 500, true);
+    return jsonResponse({ error: msg }, 500, true, request);
   }
 }
 
