@@ -63,10 +63,13 @@ export default {
           })
         : courses;
 
+      const origin = request.headers.get('Origin') ?? '';
+      const allowOrigin = origin.includes('localhost') || origin.includes('127.0.0.1') ? origin : 'https://rownative.icu';
       return new Response(JSON.stringify({ courses: filtered }), {
         headers: {
           'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Origin': allowOrigin,
+          'Access-Control-Allow-Credentials': 'true',
         },
       });
     }
