@@ -138,3 +138,36 @@ export function isOtwRowing(activity: IntervalsActivity): boolean {
   const t = (activity.type ?? '').trim();
   return t === 'Rowing';
 }
+
+/** Athlete profile for display name pre-fill. */
+export interface IntervalsAthleteProfile {
+  id: string;
+  name?: string;
+  first_name?: string;
+  last_name?: string;
+}
+
+/**
+ * Fetch athlete profile from intervals.icu (for display name in challenge submission).
+ * Requires OAuth access token. Returns null on failure.
+ */
+export async function fetchIntervalsAthleteProfile(
+  accessToken: string
+): Promise<IntervalsAthleteProfile | null> {
+  const res = await fetch(`${INTERVALS_BASE}/api/v1/athlete/self`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) return null;
+  const data = await res.json() as Record<string, unknown>;
+  if (!data || typeof data.id !== 'string') return null;
+  const name =
+    typeof data.name === 'string' && data.name.trim()
+      ? data.name.trim()
+      : [data.first_name, data.last_name].filter(Boolean).join(' ').trim() || undefined;
+  return {
+    id: data.id as string,
+    name,
+    first_name: typeof data.first_name === 'string' ? data.first_name : undefined,
+    last_name: typeof data.last_name === 'string' ? data.last_name : undefined,
+  };
+}

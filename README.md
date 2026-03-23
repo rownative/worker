@@ -15,7 +15,7 @@ The worker runs on Cloudflare and handles all `/api/*` and `/oauth/*` routes for
 | `/api/courses` | GET | — | Course index. Returns `{ courses }`. Optional geo filter: `?lat=&lon=&radius=` (all in meters; filters by haversine distance from center) |
 | `/api/courses/kml` | GET | — | KML bundle for course IDs. Query: `?ids=1,2,3` (required) |
 | `/api/courses/{id}` | GET | — | Single course KML. Optional: `?cn=true` for Chinese KML variant |
-| `/api/me` | GET | — | Current user: `{ athleteId, liked, isOrganizer }` or `{ athleteId: null, liked: [], isOrganizer: false }` |
+| `/api/me` | GET | — | Current user: `{ athleteId, liked, isOrganizer, athleteDisplayName? }` or `{ athleteId: null, liked: [], isOrganizer: false }`. `athleteDisplayName` from intervals.icu profile (for challenge submission pre-fill). |
 
 ### Authenticated endpoints (cookie or API key)
 
@@ -128,6 +128,8 @@ Set these via `wrangler secret put <NAME>`:
 | `GITHUB_TOKEN` | GitHub PAT or App token for course import (submit, update, import-zip) |
 
 `GITHUB_REPO` is an optional environment variable (default: `rownative/courses`).
+
+See [docs/DEPLOY.md](docs/DEPLOY.md) for full deployment instructions.
 
 ## Development
 

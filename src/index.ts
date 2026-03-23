@@ -5,6 +5,7 @@ import { computeHandicap } from './handicap';
 import {
   fetchIntervalsActivities,
   fetchIntervalsActivity,
+  fetchIntervalsAthleteProfile,
   fetchIntervalsStreams,
   isOtwRowing,
   type IntervalsActivity,
@@ -116,13 +117,19 @@ export default {
     // GET /api/me — 200 with null when unauthenticated (avoids console noise)
     if (path === '/api/me' || path === '/api/me/') {
       const athleteId = await getAthleteIdFromRequest(request, env);
-      let payload: { athleteId: string | null; liked: string[]; isOrganizer?: boolean };
+      let payload: { athleteId: string | null; liked: string[]; isOrganizer?: boolean; athleteDisplayName?: string };
       if (athleteId) {
+        const session = await getSessionFromRequest(request, env);
+        let athleteDisplayName: string | undefined;
+        if (session?.accessToken) {
+          const profile = await fetchIntervalsAthleteProfile(session.accessToken);
+          athleteDisplayName = profile?.name;
+        }
         const [liked, isOrg] = await Promise.all([
           env.ROWING_COURSES.get(`liked:${athleteId}`).then((v) => JSON.parse(v ?? '[]') as string[]),
           isOrganizer(athleteId, env),
         ]);
-        payload = { athleteId, liked, isOrganizer: isOrg };
+        payload = { athleteId, liked, isOrganizer: isOrg, athleteDisplayName };
       } else {
         payload = { athleteId: null, liked: [], isOrganizer: false };
       }
