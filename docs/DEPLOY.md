@@ -53,7 +53,7 @@ Set production secrets with `wrangler secret put`:
 | `INTERVALS_CLIENT_ID` | From intervals.icu Developer Settings |
 | `INTERVALS_CLIENT_SECRET` | From intervals.icu Developer Settings |
 | `TOKEN_ENCRYPTION_KEY` | Random 32+ byte key for session encryption (e.g. `openssl rand -base64 32`) |
-| `GITHUB_TOKEN` | GitHub PAT or App token (for course submit/update/import, organisers fetch) |
+| `GITHUB_TOKEN` | GitHub PAT or App token (for course submit/update/import, organisers fetch, challenge-created notifications). Needs `repo` scope for issue creation. |
 
 Optional: `GITHUB_REPO` env var (default: `rownative/courses`).
 
@@ -107,7 +107,23 @@ Both are fetched from GitHub; update via PR. Worker caches organisers for 5 minu
 
 ---
 
-## 7. Post-Deploy Checklist
+## 7. Post-Merge Deployment (Challenges)
+
+When deploying after merging the challenges feature, run **migrations first**, then deploy:
+
+```bash
+# 1. Apply D1 migrations (challenges, challenge_results, standard_collections, course_standards)
+npx wrangler d1 migrations apply rowing-courses-db --remote
+
+# 2. Deploy worker
+npm run deploy
+```
+
+Requires `CLOUDFLARE_API_TOKEN` (or `wrangler login`). Ensure `GITHUB_TOKEN` has `repo` scope if challenge-created notifications should work.
+
+---
+
+## 8. Post-Deploy Checklist
 
 - [ ] OAuth login works (test with intervals.icu)
 - [ ] Course index loads (`/api/courses`)
@@ -118,7 +134,7 @@ Both are fetched from GitHub; update via PR. Worker caches organisers for 5 minu
 
 ---
 
-## 8. Local Development
+## 9. Local Development
 
 ```bash
 npm run dev
