@@ -128,7 +128,7 @@ export default {
         }
         const [liked, isOrg] = await Promise.all([
           env.ROWING_COURSES.get(`liked:${athleteId}`).then((v) => JSON.parse(v ?? '[]') as string[]),
-          isOrganizer(athleteId, env),
+          isOrganizer(athleteId, env, request),
         ]);
         payload = { athleteId, liked, isOrganizer: isOrg, athleteDisplayName };
       } else {
@@ -427,7 +427,7 @@ export default {
     if ((path === '/api/organiser/challenges' || path === '/api/organiser/challenges/') && request.method === 'POST') {
       const athleteId = await getAthleteIdFromRequest(request, env);
       if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const isOrg = await isOrganizer(athleteId, env);
+      const isOrg = await isOrganizer(athleteId, env, request);
       if (!isOrg) return jsonResponse({ error: 'Organiser access required' }, 403, true);
       const result = await handleCreateChallenge(request, athleteId, env, ctx);
       return result;
@@ -445,7 +445,7 @@ export default {
     if ((path === '/api/organiser/standard-collections' || path === '/api/organiser/standard-collections/') && request.method === 'POST') {
       const athleteId = await getAthleteIdFromRequest(request, env);
       if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const isOrg = await isOrganizer(athleteId, env);
+      const isOrg = await isOrganizer(athleteId, env, request);
       if (!isOrg) return jsonResponse({ error: 'Organiser access required' }, 403, true);
       const result = await handleCreateStandardCollection(request, athleteId, env);
       return result;
@@ -456,7 +456,7 @@ export default {
     if (organiserResultsMatch && request.method === 'GET') {
       const athleteId = await getAthleteIdFromRequest(request, env);
       if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const isOrg = await isOrganizer(athleteId, env);
+      const isOrg = await isOrganizer(athleteId, env, request);
       if (!isOrg) return jsonResponse({ error: 'Organiser access required' }, 403, true);
       const result = await handleOrganiserChallengeResults(organiserResultsMatch[1], athleteId, env);
       return result;
@@ -467,7 +467,7 @@ export default {
     if (organiserOverrideMatch && request.method === 'POST') {
       const athleteId = await getAthleteIdFromRequest(request, env);
       if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const isOrg = await isOrganizer(athleteId, env);
+      const isOrg = await isOrganizer(athleteId, env, request);
       if (!isOrg) return jsonResponse({ error: 'Organiser access required' }, 403, true);
       const result = await handleOrganiserResultOverride(request, organiserOverrideMatch[1], athleteId, env);
       return result;
@@ -478,7 +478,7 @@ export default {
     if (organiserTrackMatch && request.method === 'GET') {
       const athleteId = await getAthleteIdFromRequest(request, env);
       if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const isOrg = await isOrganizer(athleteId, env);
+      const isOrg = await isOrganizer(athleteId, env, request);
       if (!isOrg) return jsonResponse({ error: 'Organiser access required' }, 403, true);
       const result = await handleOrganiserResultTrack(organiserTrackMatch[1], athleteId, env);
       return result;
@@ -575,7 +575,15 @@ async function getOrganiserIds(env: Env): Promise<Set<string>> {
 }
 
 /** Check if athlete is an organiser (from organisers.json). */
-async function isOrganizer(athleteId: string, env: Env): Promise<boolean> {
+async function isOrganizer(athleteId: string, env: Env, request?: Request): Promise<boolean> {
+  if (request) {
+    const host = request.headers.get('Host') ?? '';
+    const origin = request.headers.get('Origin') ?? '';
+    if (host.startsWith('localhost') || host.startsWith('127.0.0.1') ||
+        origin.includes('localhost') || origin.includes('127.0.0.1')) {
+      return true; // dev: any signed-in user can act as organiser
+    }
+  }
   const ids = await getOrganiserIds(env);
   return ids.has(athleteId);
 }
