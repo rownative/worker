@@ -21,6 +21,22 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    // CORS preflight — required for credentialed POST from localhost
+    if (request.method === 'OPTIONS') {
+      const origin = request.headers.get('Origin') ?? '';
+      const allowOrigin = origin.includes('localhost') || origin.includes('127.0.0.1') ? origin : 'https://rownative.icu';
+      return new Response(null, {
+        status: 204,
+        headers: {
+          'Access-Control-Allow-Origin': allowOrigin,
+          'Access-Control-Allow-Credentials': 'true',
+          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+          'Access-Control-Max-Age': '86400',
+        },
+      });
+    }
+
     // Course index (optional geo filter: ?lat=&lon=&radius=)
     if (path === '/api/courses/' || path === '/api/courses') {
       const latVal = url.searchParams.get('lat');
@@ -110,10 +126,12 @@ export default {
       } else {
         payload = { athleteId: null, liked: [], isOrganizer: false };
       }
+      const origin = request.headers.get('Origin') ?? '';
+      const allowOrigin = origin.includes('localhost') || origin.includes('127.0.0.1') ? origin : 'https://rownative.icu';
       return new Response(JSON.stringify(payload), {
         headers: {
           'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': 'https://rownative.icu',
+          'Access-Control-Allow-Origin': allowOrigin,
           'Access-Control-Allow-Credentials': 'true',
         },
       });
@@ -134,24 +152,54 @@ export default {
       });
     }
 
+    // OAuth debug — show exact redirect_uri for copying into intervals.icu app settings
+    if (path === '/oauth/debug') {
+      const localParam = url.searchParams.get('local') === '1';
+      const hostHeader = request.headers.get('Host') ?? '';
+      const isLocalByHost = hostHeader.startsWith('localhost') || hostHeader.startsWith('127.0.0.1');
+      const isLocalByUrl = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+      const isLocal = localParam || isLocalByHost || isLocalByUrl;
+      const redirectUri = isLocal
+        ? 'http://localhost:8787/oauth/callback'
+        : 'https://rownative.icu/oauth/callback';
+      return new Response(
+        JSON.stringify({
+          redirect_uri: redirectUri,
+          hint: 'Add this exact string to intervals.icu Developer Settings → Manage App → Redirect URIs',
+          request_url: url.href,
+          local_param: localParam,
+          host_header: hostHeader,
+        }, null, 2),
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
     // OAuth login — redirect to intervals.icu (with state for CSRF protection)
     if (path === '/oauth/authorize') {
+      const localParam = url.searchParams.get('local') === '1';
+      const hostHeader = request.headers.get('Host') ?? '';
+      const isLocal = localParam || hostHeader.startsWith('localhost') || hostHeader.startsWith('127.0.0.1')
+        || url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+      const redirectUri = isLocal ? 'http://localhost:8787/oauth/callback' : 'https://rownative.icu/oauth/callback';
       const state = crypto.randomUUID();
-      console.log(`[oauth] authorize: generated state=${state}`);
-      // Store state in KV for iOS fallback (ASWebAuthenticationSession ephemeral mode doesn't persist cookies)
-      await env.ROWING_COURSES.put(`oauth_state:${state}`, '1', { expirationTtl: 600 });
+      const returnTo = url.searchParams.get('return_to');
+      console.log(`[oauth] authorize: generated state=${state}, redirect_uri=${redirectUri}`);
+      // Store state in KV; value 'local' or 'local:<returnTo>' signals local dev
+      const stateVal = isLocal ? (returnTo ? `local:${returnTo}` : 'local') : '1';
+      await env.ROWING_COURSES.put(`oauth_state:${state}`, stateVal, { expirationTtl: 600 });
       const params = new URLSearchParams({
         client_id: env.INTERVALS_CLIENT_ID,
-        redirect_uri: 'https://rownative.icu/oauth/callback',
+        redirect_uri: redirectUri,
         response_type: 'code',
         scope: 'ACTIVITY:READ',
         state,
       });
+      const stateCookieSecure = isLocal ? '' : '; Secure';
       return new Response(null, {
         status: 302,
         headers: {
           'Location': `https://intervals.icu/oauth/authorize?${params}`,
-          'Set-Cookie': `rn_oauth_state=${state}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600`,
+          'Set-Cookie': `rn_oauth_state=${state}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600${stateCookieSecure}`,
         },
       });
     }
@@ -165,10 +213,8 @@ export default {
       const cookieHeader = request.headers.get('Cookie') ?? '';
       const stateMatch = cookieHeader.match(/rn_oauth_state=([^;]+)/);
       let storedState = stateMatch ? stateMatch[1].trim() : null;
-      if (!storedState && state) {
-        const kvState = await env.ROWING_COURSES.get(`oauth_state:${state}`);
-        if (kvState) storedState = state;
-      }
+      const kvVal = state ? await env.ROWING_COURSES.get(`oauth_state:${state}`) : null;
+      if (!storedState && kvVal) storedState = state;
       console.log(`[oauth] callback: code present=${!!code}, state from URL=${state}`);
       console.log(`[oauth] callback: cookie header present=${cookieHeader.length > 0}, stored state=${storedState}`);
       console.log(`[oauth] callback: state match=${!!state && !!storedState && state === storedState}`);
@@ -177,8 +223,11 @@ export default {
         console.log(`[oauth] callback: validation failed — ${reason}`);
         return new Response(reason, { status: 400 });
       }
-      // Consume one-time state (delete from KV if we used it)
       await env.ROWING_COURSES.delete(`oauth_state:${state}`);
+      const isLocal = kvVal === 'local' || (typeof kvVal === 'string' && kvVal.startsWith('local:'));
+      const returnTo = (typeof kvVal === 'string' && kvVal.startsWith('local:')) ? kvVal.slice(6) : null;
+
+      const redirectUri = isLocal ? 'http://localhost:8787/oauth/callback' : 'https://rownative.icu/oauth/callback';
 
       // Exchange code for tokens
       const tokenRes = await fetch('https://intervals.icu/api/oauth/token', {
@@ -189,7 +238,7 @@ export default {
           client_secret: env.INTERVALS_CLIENT_SECRET,
           code,
           grant_type: 'authorization_code',
-          redirect_uri: 'https://rownative.icu/oauth/callback',
+          redirect_uri: redirectUri,
         }),
       });
       if (!tokenRes.ok) {
@@ -215,20 +264,30 @@ export default {
         expiresAt: 0, // no expiry
       };
       const cookie = await encryptSession(session, env.TOKEN_ENCRYPTION_KEY);
-      const headers = new Headers({ 'Location': '/' });
-      headers.append('Set-Cookie', `rn_session=${cookie}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=7776000`);
-      headers.append('Set-Cookie', 'rn_oauth_state=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0');
+      const postAuthRedirect = (isLocal && returnTo) ? returnTo : (isLocal ? 'http://localhost:8080/' : '/');
+      const headers = new Headers({ 'Location': postAuthRedirect });
+      const cookieSecure = isLocal ? '' : '; Secure';
+      headers.append('Set-Cookie', `rn_session=${cookie}; HttpOnly; SameSite=Lax; Path=/; Max-Age=7776000${cookieSecure}`);
+      const clearStateSecure = isLocal ? '' : '; Secure';
+      headers.append('Set-Cookie', `rn_oauth_state=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${clearStateSecure}`);
 
       return new Response(null, { status: 302, headers });
     }
 
     // OAuth logout
     if (path === '/oauth/logout') {
+      const localParam = url.searchParams.get('local') === '1';
+      const returnTo = url.searchParams.get('return_to');
+      const hostHeader = request.headers.get('Host') ?? '';
+      const isLocal = localParam || hostHeader.startsWith('localhost') || hostHeader.startsWith('127.0.0.1')
+        || url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+      const logoutRedirect = (isLocal && returnTo) ? returnTo : (isLocal ? 'http://localhost:8080/' : '/');
+      const logoutCookieSecure = isLocal ? '' : '; Secure';
       return new Response(null, {
         status: 302,
         headers: {
-          'Location': '/',
-          'Set-Cookie': 'rn_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0',
+          'Location': logoutRedirect,
+          'Set-Cookie': `rn_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${logoutCookieSecure}`,
         },
       });
     }
@@ -268,17 +327,15 @@ export default {
     if (trackMatch && request.method === 'GET') {
       const activityId = trackMatch[1];
       const session = await getSessionFromRequest(request, env);
-      if (!session) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const result = await handleGetActivityTrack(activityId, session, env);
-      return result;
+      if (!session) return jsonResponse({ error: 'Unauthorised' }, 401, true, request);
+      return withCors(await handleGetActivityTrack(activityId, session, env), request);
     }
 
     // GET /api/me/activities — OTW rowing, last month
     if ((path === '/api/me/activities' || path === '/api/me/activities/') && request.method === 'GET') {
       const session = await getSessionFromRequest(request, env);
-      if (!session) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const result = await handleGetActivities(session, env);
-      return result;
+      if (!session) return jsonResponse({ error: 'Unauthorised' }, 401, true, request);
+      return withCors(await handleGetActivities(session, env), request);
     }
 
     // POST /api/courses/{id}/calculate-time
@@ -286,9 +343,8 @@ export default {
     if (calcMatch && request.method === 'POST') {
       const courseId = calcMatch[1];
       const session = await getSessionFromRequest(request, env);
-      if (!session) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const result = await handleCalculateTime(request, courseId, session, env);
-      return result;
+      if (!session) return jsonResponse({ error: 'Unauthorised' }, 401, true, request);
+      return withCors(await handleCalculateTime(request, courseId, session, env), request);
     }
 
     // POST /api/courses/{id}/course-times — save course time
@@ -296,17 +352,15 @@ export default {
     if (saveMatch && request.method === 'POST') {
       const courseId = saveMatch[1];
       const athleteId = await getAthleteIdFromRequest(request, env);
-      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const result = await handleSaveCourseTime(request, courseId, athleteId, env);
-      return result;
+      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true, request);
+      return withCors(await handleSaveCourseTime(request, courseId, athleteId, env), request);
     }
 
     // GET /api/me/course-times
     if ((path === '/api/me/course-times' || path === '/api/me/course-times/') && request.method === 'GET') {
       const athleteId = await getAthleteIdFromRequest(request, env);
-      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const result = await handleGetCourseTimes(athleteId, env);
-      return result;
+      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true, request);
+      return withCors(await handleGetCourseTimes(athleteId, env), request);
     }
 
     // DELETE /api/me/course-times/:id
@@ -314,9 +368,8 @@ export default {
     if (deleteMatch && request.method === 'DELETE') {
       const timeId = deleteMatch[1];
       const athleteId = await getAthleteIdFromRequest(request, env);
-      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const result = await handleDeleteCourseTime(timeId, athleteId, env);
-      return result;
+      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true, request);
+      return withCors(await handleDeleteCourseTime(timeId, athleteId, env), request);
     }
 
     // GET /api/challenges?status=active|upcoming|past
@@ -593,14 +646,28 @@ async function getAesKey(secret: string): Promise<CryptoKey> {
 
 // ── Import ZIP ─────────────────────────────────────────────────────────────────
 
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': 'https://rownative.icu',
-  'Access-Control-Allow-Credentials': 'true',
-};
+function corsHeaders(request: Request): Record<string, string> {
+  const origin = request.headers.get('Origin') ?? '';
+  const allowOrigin =
+    origin.includes('localhost') || origin.includes('127.0.0.1') ? origin : 'https://rownative.icu';
+  return {
+    'Access-Control-Allow-Origin': allowOrigin,
+    'Access-Control-Allow-Credentials': 'true',
+  };
+}
 
-function jsonResponse(body: object, status: number, withCors = false): Response {
+/** Apply CORS headers to a response (for local dev when request has localhost Origin). */
+function withCors(res: Response, request: Request): Response {
+  const headers = new Headers(res.headers);
+  const cors = corsHeaders(request);
+  headers.set('Access-Control-Allow-Origin', cors['Access-Control-Allow-Origin']);
+  headers.set('Access-Control-Allow-Credentials', cors['Access-Control-Allow-Credentials']);
+  return new Response(res.body, { status: res.status, headers });
+}
+
+function jsonResponse(body: object, status: number, withCors = false, request?: Request): Response {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (withCors) Object.assign(headers, CORS_HEADERS);
+  if (withCors) Object.assign(headers, corsHeaders(request ?? new Request('http://x')));
   return new Response(JSON.stringify(body), { status, headers });
 }
 
@@ -1043,27 +1110,37 @@ async function handleCalculateTime(
     track.push({ lat, lon, time: time[i] });
   }
 
+  const debugMode = new URL(request.url).searchParams.get('debug') === '1';
+
   const result = calculateCourseTime(
     course as { id: string; polygons: Array<{ name: string; order: number; points: Array<{ lat: number; lon: number }> }>; distance_m?: number },
     track,
-    haversine
+    haversine,
+    debugMode ? { debug: true } : undefined
   );
+
   // Downsample latlng for map overlay (max ~600 points)
   const maxPoints = 600;
   const step = latlng.length <= maxPoints ? 1 : Math.ceil(latlng.length / maxPoints);
   const latlngForMap = latlng.filter((_, i) => i % step === 0);
 
-  return jsonResponse(
-    {
-      valid: result.valid,
-      timeS: result.timeS,
-      distanceM: result.distanceM,
-      validationNote: result.validationNote,
-      latlng: latlngForMap,
-    },
-    200,
-    true
-  );
+  const payload: Record<string, unknown> = {
+    valid: result.valid,
+    timeS: result.timeS,
+    distanceM: result.distanceM,
+    validationNote: result.validationNote,
+    latlng: latlngForMap,
+  };
+  if (debugMode) {
+    const tMin = len > 0 ? Math.min(...time.slice(0, len)) : 0;
+    const tMax = len > 0 ? Math.max(...time.slice(0, len)) : 0;
+    payload._debug = {
+      track: { points: len, timeMin: tMin, timeMax: tMax, timeFirst3: time.slice(0, 3), timeLast3: time.slice(-3), latlngFirst: latlng[0], latlngLast: latlng[len - 1] },
+      gates: result._debug,
+    };
+  }
+
+  return jsonResponse(payload, 200, true, request);
 }
 
 async function handleSaveCourseTime(

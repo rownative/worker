@@ -28,6 +28,11 @@ export interface CourseTimeResult {
   validationNote: string;
   startSecond?: number;
   endSecond?: number;
+  _debug?: {
+    exitTimesFromStart: number[];
+    records: Array<{ netTime: number; startS: number; endS: number; completed: boolean }>;
+    best: { netTime: number; startS: number; endS: number };
+  };
 }
 
 /** Ray-casting point-in-polygon. Polygon should be closed (implicit if first !== last). */
@@ -94,15 +99,20 @@ export function timeInPath(
   for (let i = 0; i < track.length - 1; i++) {
     const currInside = inPolygon[i];
     const nextInside = inPolygon[i + 1];
+    const d0 = (track[i] as TrackPoint & { cumdist?: number }).cumdist ?? 0;
+    const d1 = (track[i + 1] as TrackPoint & { cumdist?: number }).cumdist ?? 0;
+    const distCross = (d0 + d1) / 2;
     if (maxmin === 'max') {
       if (currInside && !nextInside) {
-        transitions.push(track[i].time);
-        dists.push((track[i] as TrackPoint & { cumdist?: number }).cumdist ?? 0);
+        // Rowsandall: use time of last inside point (df[b==2]['time'])
+        const tCross = track[i].time;
+        transitions.push(tCross);
+        dists.push(distCross);
       }
     } else {
       if (!currInside && nextInside) {
         transitions.push(track[i + 1].time);
-        dists.push((track[i + 1] as TrackPoint & { cumdist?: number }).cumdist ?? 0);
+        dists.push(distCross);
       }
     }
   }
@@ -114,7 +124,8 @@ export function timeInPath(
 
 /**
  * Recursive: find first complete passage through gates in order.
- * Returns (endTime, distance, completed). For last gate uses exit time.
+ * finalMaxMin: 'max' = exit (when leaving polygon), 'min' = entry (when entering).
+ * For finish gate we use 'min' (entry) so time stops when bow crosses the line.
  */
 export function coursetimePaths(
   track: TrackPoint[],
@@ -230,7 +241,7 @@ export function calculateCourseTime(
   course: Course,
   track: TrackPoint[],
   haversineFn: (a: { lat: number; lon: number }, b: { lat: number; lon: number }) => number,
-  options?: { log?: string[] }
+  options?: { log?: string[]; debug?: boolean }
 ): CourseTimeResult {
   const log = options?.log ?? [];
   const note: string[] = [];
@@ -259,23 +270,25 @@ export function calculateCourseTime(
   const records: Array<{ netTime: number; dist: number; completed: boolean; startS: number; endS: number }> = [];
 
   for (const startT of entryTimes) {
+    // Rowsandall uses startt-10s buffer; 10s is safe for gate detection
     const sliceStart = Math.max(0, startT - 10);
     const sliced = withDist.filter((p) => p.time >= sliceStart).map((p) => ({
       ...p,
       time: p.time - sliceStart,
     }));
     const polygons = course.polygons;
-    const pathsResult = coursetimePaths(sliced, polygons, 'max', log);
+    const pathsResult = coursetimePaths(sliced, polygons, 'min', log);
     const firstResult = coursetimeFirst(sliced, polygons);
-
+    // Rowsandall: net = coursetime_paths - coursetime_first
     const netTime = pathsResult.time - firstResult.time;
+    const endS = pathsResult.time + sliceStart;
     const dist = pathsResult.time > 0 ? (pathsResult.dist || 0) : 0;
     records.push({
       netTime,
       dist,
       completed: pathsResult.completed,
-      startS: firstResult.time + sliceStart,
-      endS: pathsResult.time + sliceStart,
+      startS: startT,
+      endS,
     });
     note.push(
       `Path starting at ${startT.toFixed(1)}s: completed=${pathsResult.completed}, net=${netTime.toFixed(1)}s`
@@ -290,6 +303,14 @@ export function calculateCourseTime(
   const best = completed.reduce((a, b) => (a.netTime < b.netTime ? a : b));
   const distanceM = course.distance_m ?? best.dist;
 
+  const debugPayload = options?.debug
+    ? {
+        exitTimesFromStart: entryTimes,
+        records: records.map((r) => ({ netTime: r.netTime, startS: r.startS, endS: r.endS, completed: r.completed })),
+        best: { netTime: best.netTime, startS: best.startS, endS: best.endS },
+      }
+    : undefined;
+
   return {
     valid: true,
     timeS: best.netTime,
@@ -297,5 +318,6 @@ export function calculateCourseTime(
     validationNote: note.join('\n'),
     startSecond: best.startS,
     endSecond: best.endS,
+    ...(debugPayload && { _debug: debugPayload }),
   };
 }
