@@ -388,16 +388,14 @@ export default {
     if (challengesListMatch && request.method === 'GET') {
       const status = url.searchParams.get('status') || 'active';
       const validStatus = ['active', 'upcoming', 'past'].includes(status) ? status : 'active';
-      const result = await handleListChallenges(validStatus, env);
-      return result;
+      return withCors(await handleListChallenges(validStatus, env), request);
     }
 
     // GET /api/challenges/:id/results
     const challengeResultsMatch = path.match(/^\/api\/challenges\/([^/]+)\/results\/?$/);
     if (challengeResultsMatch && request.method === 'GET') {
       const challengeId = challengeResultsMatch[1];
-      const result = await handleChallengeResults(challengeId, env);
-      return result;
+      return withCors(await handleChallengeResults(challengeId, env), request);
     }
 
     // POST /api/challenges/:id/submit
@@ -405,17 +403,15 @@ export default {
     if (challengeSubmitMatch && request.method === 'POST') {
       const challengeId = challengeSubmitMatch[1];
       const athleteId = await getAthleteIdFromRequest(request, env);
-      if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
-      const result = await handleChallengeSubmit(request, challengeId, athleteId, env);
-      return result;
+      if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
+      return withCors(await handleChallengeSubmit(request, challengeId, athleteId, env), request);
     }
 
     // GET /api/challenges/:id
     const challengeDetailMatch = path.match(/^\/api\/challenges\/([^/]+)\/?$/);
     if (challengeDetailMatch && request.method === 'GET') {
       const challengeId = challengeDetailMatch[1];
-      const result = await handleChallengeDetail(challengeId, env);
-      return result;
+      return withCors(await handleChallengeDetail(challengeId, env), request);
     }
 
     // GET /api/organiser/challenges
