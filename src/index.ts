@@ -1669,6 +1669,7 @@ async function handleOrganiserChallengeResults(challengeId: string, athleteId: s
         points: row.points ?? null,
         boatType: row.boat_type ?? null,
         sex: row.sex ?? null,
+        crewAvgAge: row.crew_avg_age != null ? Number(row.crew_avg_age) : null,
         workoutDate,
         validationStatus: row.validation_status ?? 'valid',
         validationNote: row.validation_note ?? null,
@@ -1768,6 +1769,7 @@ async function handleChallengeResults(challengeId: string, env: Env): Promise<Re
         points: row.points ?? null,
         boatType: row.boat_type ?? null,
         sex: row.sex ?? null,
+        crewAvgAge: row.crew_avg_age != null ? Number(row.crew_avg_age) : null,
         workoutDate,
         validationStatus: row.validation_status ?? 'valid',
       };
@@ -1789,7 +1791,7 @@ async function handleChallengeSubmit(
   const removed = await getRemovedChallengeIds(env);
   if (removed.has(challengeId)) return jsonResponse({ error: 'Not found' }, 404, true);
 
-  let body: { activityId?: string; displayName?: string; boatType?: string; sex?: string; weightClass?: string };
+  let body: { activityId?: string; displayName?: string; boatType?: string; sex?: string; weightClass?: string; crewAvgAge?: number };
   try {
     body = (await request.json()) as typeof body;
   } catch {
@@ -1887,6 +1889,15 @@ async function handleChallengeSubmit(
   const sex = body.sex ? String(body.sex).trim() || null : null;
   const weightClass = body.weightClass ? String(body.weightClass).trim() || null : null;
 
+  let crewAvgAge: number | null = null;
+  if (body.crewAvgAge != null) {
+    const n = Number(body.crewAvgAge);
+    if (!Number.isInteger(n) || n < 8 || n > 120) {
+      return jsonResponse({ error: 'crewAvgAge must be an integer between 8 and 120' }, 400, true);
+    }
+    crewAvgAge = n;
+  }
+
   const collectionId = ch.collection_id ? String(ch.collection_id) : null;
   const hasHandicap = !!collectionId;
   if (hasHandicap && (!boatType || !sex)) {
@@ -1931,8 +1942,8 @@ async function handleChallengeSubmit(
     replaced = !!existingForCategory;
 
     await env.DB.prepare(
-      `INSERT INTO challenge_results (id, challenge_id, athlete_id, activity_id, display_name, raw_time_s, corrected_time_s, points, boat_type, sex, weight_class, start_time, validation_status, validation_note, track_latlng, submitted_at, category_key)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'valid', ?, ?, ?, ?)
+      `INSERT INTO challenge_results (id, challenge_id, athlete_id, activity_id, display_name, raw_time_s, corrected_time_s, points, boat_type, sex, weight_class, crew_avg_age, start_time, validation_status, validation_note, track_latlng, submitted_at, category_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'valid', ?, ?, ?, ?)
        ON CONFLICT(challenge_id, athlete_id, category_key) DO UPDATE SET
          activity_id = excluded.activity_id,
          display_name = excluded.display_name,
@@ -1942,13 +1953,14 @@ async function handleChallengeSubmit(
          boat_type = excluded.boat_type,
          sex = excluded.sex,
          weight_class = excluded.weight_class,
+         crew_avg_age = excluded.crew_avg_age,
          start_time = excluded.start_time,
          validation_status = 'valid',
          validation_note = excluded.validation_note,
          track_latlng = excluded.track_latlng,
          submitted_at = excluded.submitted_at`
     )
-      .bind(id, challengeId, athleteId, activityId, displayName, result.timeS, correctedTimeS, points, boatType, sex, weightClass, startTime, validationNote, trackLatlng, submittedAt, categoryKey)
+      .bind(id, challengeId, athleteId, activityId, displayName, result.timeS, correctedTimeS, points, boatType, sex, weightClass, crewAvgAge, startTime, validationNote, trackLatlng, submittedAt, categoryKey)
       .run();
     const existing = await env.DB.prepare(
       'SELECT id FROM challenge_results WHERE challenge_id = ? AND athlete_id = ? AND category_key = ?'
