@@ -10,6 +10,7 @@ import {
   isOtwRowing,
   type IntervalsActivity,
 } from './intervals-api';
+import { isNameAllowed } from './content-filter';
 
 // Rowing courses API
 const COURSES_BASE = 'https://raw.githubusercontent.com/rownative/courses/main';
@@ -428,7 +429,7 @@ export default {
       if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true);
       const isOrg = await isOrganizer(athleteId, env);
       if (!isOrg) return jsonResponse({ error: 'Organiser access required' }, 403, true);
-      const result = await handleCreateChallenge(request, athleteId, env);
+      const result = await handleCreateChallenge(request, athleteId, env, ctx);
       return result;
     }
 
@@ -577,6 +578,47 @@ async function getOrganiserIds(env: Env): Promise<Set<string>> {
 async function isOrganizer(athleteId: string, env: Env): Promise<boolean> {
   const ids = await getOrganiserIds(env);
   return ids.has(athleteId);
+}
+
+/** Create a GitHub issue to notify admins of a new challenge. Fire-and-forget; failures are ignored. */
+async function notifyAdminsNewChallenge(
+  env: Env,
+  challenge: { id: string; name: string; courseId: string; rowStart: string; rowEnd: string; submitEnd: string; athleteId: string }
+): Promise<void> {
+  const token = env.GITHUB_TOKEN;
+  if (!token) return;
+  const repo = env.GITHUB_REPO ?? 'rownative/courses';
+  const [owner, repoName] = repo.split('/');
+  if (!owner || !repoName) return;
+
+  const viewUrl = `https://rownative.icu/challenge.html?id=${encodeURIComponent(challenge.id)}`;
+  const title = `New challenge: ${challenge.name}`;
+  const body = `Challenge created by organiser (athlete ID: ${challenge.athleteId}).
+
+- **Name:** ${challenge.name}
+- **Course:** ${challenge.courseId}
+- **Row window:** ${challenge.rowStart} – ${challenge.rowEnd}
+- **Submit deadline:** ${challenge.submitEnd}
+- **View:** ${viewUrl}`;
+
+  try {
+    const res = await fetch(`https://api.github.com/repos/${owner}/${repoName}/issues`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'Content-Type': 'application/json',
+        'User-Agent': 'rownative-worker',
+      },
+      body: JSON.stringify({ title, body }),
+    });
+    if (!res.ok) {
+      console.error('[notifyAdminsNewChallenge] GitHub API error:', res.status, await res.text());
+    }
+  } catch (e) {
+    console.error('[notifyAdminsNewChallenge] Failed:', e);
+  }
 }
 
 /** Get session from cookie (browser auth). Returns null for API key. */
@@ -1443,7 +1485,7 @@ async function handleOrganiserChallengesList(athleteId: string, env: Env): Promi
   }
 }
 
-async function handleCreateChallenge(request: Request, athleteId: string, env: Env): Promise<Response> {
+async function handleCreateChallenge(request: Request, athleteId: string, env: Env, ctx?: ExecutionContext): Promise<Response> {
   if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
   let body: { name?: string; courseId?: string; rowStart?: string; rowEnd?: string; submitEnd?: string; collectionId?: string; notes?: string; isPublic?: boolean };
   try {
@@ -1458,6 +1500,10 @@ async function handleCreateChallenge(request: Request, athleteId: string, env: E
   const submitEnd = body.submitEnd ? String(body.submitEnd).slice(0, 19) : null;
   if (!name || !courseId || !rowStart || !rowEnd || !submitEnd) {
     return jsonResponse({ error: 'name, courseId, rowStart, rowEnd, submitEnd required' }, 400, true);
+  }
+  const nameCheck = isNameAllowed(name);
+  if (!nameCheck.allowed) {
+    return jsonResponse({ error: nameCheck.reason ?? "That name isn't allowed." }, 400, true);
   }
   const collectionId = body.collectionId ? String(body.collectionId).trim() || null : null;
   const notes = body.notes?.trim() || null;
@@ -1482,6 +1528,11 @@ async function handleCreateChallenge(request: Request, athleteId: string, env: E
     courses,
     customColls
   );
+
+  if (ctx) {
+    ctx.waitUntil(notifyAdminsNewChallenge(env, { id, name, courseId, rowStart, rowEnd, submitEnd, athleteId }));
+  }
+
   return jsonResponse({ id, challenge }, 200, true);
 }
 
@@ -1824,7 +1875,14 @@ async function handleChallengeSubmit(
     }, 400, true);
   }
 
-  const displayName = body.displayName?.trim() || null;
+  const displayNameRaw = body.displayName?.trim() || null;
+  if (displayNameRaw) {
+    const displayCheck = isNameAllowed(displayNameRaw);
+    if (!displayCheck.allowed) {
+      return jsonResponse({ error: displayCheck.reason ?? "That name isn't allowed." }, 400, true);
+    }
+  }
+  const displayName = displayNameRaw;
   const boatType = body.boatType ? String(body.boatType).trim() || null : null;
   const sex = body.sex ? String(body.sex).trim() || null : null;
   const weightClass = body.weightClass ? String(body.weightClass).trim() || null : null;
