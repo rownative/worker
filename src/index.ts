@@ -1497,54 +1497,59 @@ async function handleOrganiserChallengesList(athleteId: string, env: Env): Promi
 }
 
 async function handleCreateChallenge(request: Request, athleteId: string, env: Env, ctx?: ExecutionContext): Promise<Response> {
-  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
-  let body: { name?: string; courseId?: string; rowStart?: string; rowEnd?: string; submitEnd?: string; collectionId?: string; notes?: string; isPublic?: boolean };
   try {
-    body = (await request.json()) as typeof body;
-  } catch {
-    return jsonResponse({ error: 'Invalid JSON body' }, 400, true);
-  }
-  const name = body.name?.trim();
-  const courseId = body.courseId ? String(body.courseId) : null;
-  const rowStart = body.rowStart ? String(body.rowStart).slice(0, 19) : null;
-  const rowEnd = body.rowEnd ? String(body.rowEnd).slice(0, 19) : null;
-  const submitEnd = body.submitEnd ? String(body.submitEnd).slice(0, 19) : null;
-  if (!name || !courseId || !rowStart || !rowEnd || !submitEnd) {
-    return jsonResponse({ error: 'name, courseId, rowStart, rowEnd, submitEnd required' }, 400, true);
-  }
-  const nameCheck = isNameAllowed(name);
-  if (!nameCheck.allowed) {
-    return jsonResponse({ error: nameCheck.reason ?? "That name isn't allowed." }, 400, true);
-  }
-  const collectionId = body.collectionId ? String(body.collectionId).trim() || null : null;
-  const notes = body.notes?.trim() || null;
-  const isPublic = body.isPublic !== false ? 1 : 0;
-  const id = crypto.randomUUID();
-  const createdAt = new Date().toISOString();
-  try {
-    await env.DB.prepare(
-      `INSERT INTO challenges (id, name, course_id, row_start, row_end, submit_end, collection_id, organizer_id, is_public, notes, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-      .bind(id, name, courseId, rowStart, rowEnd, submitEnd, collectionId, athleteId, isPublic, notes, createdAt)
-      .run();
+    if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+    let body: { name?: string; courseId?: string; rowStart?: string; rowEnd?: string; submitEnd?: string; collectionId?: string; notes?: string; isPublic?: boolean };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return jsonResponse({ error: 'Invalid JSON body' }, 400, true);
+    }
+    const name = body.name?.trim();
+    const courseId = body.courseId ? String(body.courseId) : null;
+    const rowStart = body.rowStart ? String(body.rowStart).slice(0, 19) : null;
+    const rowEnd = body.rowEnd ? String(body.rowEnd).slice(0, 19) : null;
+    const submitEnd = body.submitEnd ? String(body.submitEnd).slice(0, 19) : null;
+    if (!name || !courseId || !rowStart || !rowEnd || !submitEnd) {
+      return jsonResponse({ error: 'name, courseId, rowStart, rowEnd, submitEnd required' }, 400, true);
+    }
+    const nameCheck = isNameAllowed(name);
+    if (!nameCheck.allowed) {
+      return jsonResponse({ error: nameCheck.reason ?? "That name isn't allowed." }, 400, true);
+    }
+    const collectionId = body.collectionId ? String(body.collectionId).trim() || null : null;
+    const notes = body.notes?.trim() || null;
+    const isPublic = body.isPublic !== false ? 1 : 0;
+    const id = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    try {
+      await env.DB.prepare(
+        `INSERT INTO challenges (id, name, course_id, row_start, row_end, submit_end, collection_id, organizer_id, is_public, notes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+        .bind(id, name, courseId, rowStart, rowEnd, submitEnd, collectionId, athleteId, isPublic, notes, createdAt)
+        .run();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Database error';
+      return jsonResponse({ error: msg }, 500, true);
+    }
+    const courses = await getCourseIndex(env);
+    const customColls = await loadCollectionNames(env);
+    const challenge = challengeToApi(
+      { id, name, course_id: courseId, row_start: rowStart, row_end: rowEnd, submit_end: submitEnd, collection_id: collectionId, organizer_id: athleteId, is_public: isPublic, notes, results_count: 0 },
+      courses,
+      customColls
+    );
+
+    if (ctx) {
+      ctx.waitUntil(notifyAdminsNewChallenge(env, { id, name, courseId, rowStart, rowEnd, submitEnd, athleteId }));
+    }
+
+    return jsonResponse({ id, challenge }, 200, true);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : 'Database error';
+    const msg = e instanceof Error ? e.message : String(e);
     return jsonResponse({ error: msg }, 500, true);
   }
-  const courses = await getCourseIndex(env);
-  const customColls = await loadCollectionNames(env);
-  const challenge = challengeToApi(
-    { id, name, course_id: courseId, row_start: rowStart, row_end: rowEnd, submit_end: submitEnd, collection_id: collectionId, organizer_id: athleteId, is_public: isPublic, notes, results_count: 0 },
-    courses,
-    customColls
-  );
-
-  if (ctx) {
-    ctx.waitUntil(notifyAdminsNewChallenge(env, { id, name, courseId, rowStart, rowEnd, submitEnd, athleteId }));
-  }
-
-  return jsonResponse({ id, challenge }, 200, true);
 }
 
 async function handleListStandardCollections(env: Env): Promise<Response> {
