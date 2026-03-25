@@ -204,4 +204,101 @@ describe('Rowing Courses Worker', () => {
 			expect(response.status).toBe(401);
 		});
 	});
+
+	describe('CORS origin validation', () => {
+		it('OPTIONS preflight with legitimate localhost origin is reflected', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/courses', {
+				method: 'OPTIONS',
+				headers: { 'Origin': 'http://localhost:3000' },
+			});
+			expect(response.headers.get('Access-Control-Allow-Origin')).toBe('http://localhost:3000');
+		});
+
+		it('OPTIONS preflight with legitimate 127.0.0.1 origin is reflected', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/courses', {
+				method: 'OPTIONS',
+				headers: { 'Origin': 'http://127.0.0.1:8080' },
+			});
+			expect(response.headers.get('Access-Control-Allow-Origin')).toBe('http://127.0.0.1:8080');
+		});
+
+		it('OPTIONS preflight with evil-localhost.com origin is NOT reflected', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/courses', {
+				method: 'OPTIONS',
+				headers: { 'Origin': 'https://evil-localhost.com' },
+			});
+			// Should fall back to the production origin, not the malicious one
+			expect(response.headers.get('Access-Control-Allow-Origin')).toBe('https://rownative.icu');
+		});
+
+		it('OPTIONS preflight with non-localhost production origin falls back to rownative.icu', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/courses', {
+				method: 'OPTIONS',
+				headers: { 'Origin': 'https://attacker.com' },
+			});
+			expect(response.headers.get('Access-Control-Allow-Origin')).toBe('https://rownative.icu');
+		});
+	});
+
+	describe('Open redirect protection', () => {
+		it('GET /oauth/authorize with non-localhost return_to is silently ignored', async () => {
+			// The state stored in KV should not contain the external URL
+			const authResponse = await fetchAndWait(
+				'https://rownative.icu/oauth/authorize?local=1&return_to=https://evil.com/steal',
+				{ headers: { 'Host': 'localhost:8787' } },
+			);
+			expect(authResponse.status).toBe(302);
+			// Obtain the state so we can read what was stored in KV
+			const location = authResponse.headers.get('Location') ?? '';
+			const urlState = new URL(location).searchParams.get('state') ?? '';
+			// Read the KV value — it should be 'local' (no return_to) rather than 'local:https://evil.com/steal'
+			const kvVal = await env.ROWING_COURSES.get(`oauth_state:${urlState}`);
+			expect(kvVal).toBe('local');
+			expect(kvVal).not.toContain('evil.com');
+		});
+
+		it('GET /oauth/authorize with localhost return_to is stored in KV', async () => {
+			const authResponse = await fetchAndWait(
+				'https://rownative.icu/oauth/authorize?local=1&return_to=http://localhost:8080/dashboard',
+				{ headers: { 'Host': 'localhost:8787' } },
+			);
+			expect(authResponse.status).toBe(302);
+			const location = authResponse.headers.get('Location') ?? '';
+			const urlState = new URL(location).searchParams.get('state') ?? '';
+			const kvVal = await env.ROWING_COURSES.get(`oauth_state:${urlState}`);
+			expect(kvVal).toBe('local:http://localhost:8080/dashboard');
+		});
+
+		it('GET /oauth/logout with non-localhost return_to is ignored, redirects to default', async () => {
+			const response = await fetchAndWait(
+				'https://rownative.icu/oauth/logout?local=1&return_to=https://evil.com/steal',
+				{ headers: { 'Host': 'localhost:8787' } },
+			);
+			expect(response.status).toBe(302);
+			const location = response.headers.get('Location') ?? '';
+			// Should redirect to the default localhost address, not to evil.com
+			expect(location).not.toContain('evil.com');
+			expect(location).toBe('http://localhost:8080/');
+		});
+
+		it('GET /oauth/logout with localhost return_to is honoured', async () => {
+			const response = await fetchAndWait(
+				'https://rownative.icu/oauth/logout?local=1&return_to=http://localhost:3000/home',
+				{ headers: { 'Host': 'localhost:8787' } },
+			);
+			expect(response.status).toBe(302);
+			expect(response.headers.get('Location')).toBe('http://localhost:3000/home');
+		});
+	});
+
+	describe('Upload size limits', () => {
+		it('POST /api/courses/import-zip returns 401 without auth (size check comes after auth)', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/courses/import-zip', {
+				method: 'POST',
+				headers: { 'Content-Type': 'multipart/form-data; boundary=----boundary' },
+				body: '------boundary\r\nContent-Disposition: form-data; name="file"; filename="a.zip"\r\n\r\ndata\r\n------boundary--',
+			});
+			expect(response.status).toBe(401);
+		});
+	});
 });
