@@ -186,7 +186,7 @@ export function displayNameFromAthletePayload(data: Record<string, unknown>): st
 
 /**
  * Metadata from GET /api/v1/athlete/{id} (for debug=1 troubleshooting).
- * Note: /api/v1/athlete/self often returns 403 for OAuth tokens; use the concrete athlete id (same as /activities).
+ * OAuth: /self is wrong; concrete id may still 403 — intervals.icu accepts id `0` as the authenticated user (see API docs / forum).
  */
 export interface IntervalsAthleteSelfMeta {
   httpStatus: number;
@@ -194,11 +194,17 @@ export interface IntervalsAthleteSelfMeta {
   topLevelKeys: string[];
   usedNestedAthlete: boolean;
   parseError?: string;
+  /** True when GET /athlete/{id} failed and GET /athlete/0 returned this response. */
+  usedAthlete0Fallback?: boolean;
+}
+
+function shouldRetryAthleteProfileWithZero(status: number): boolean {
+  return status === 403 || status === 401 || status === 404;
 }
 
 /**
- * Same as fetchIntervalsAthleteProfile plus response metadata (single HTTP request).
- * @param athleteId intervals.icu athlete id (e.g. i58453) — must match session; not "self".
+ * Same as fetchIntervalsAthleteProfile plus response metadata (one or two HTTP requests).
+ * @param athleteId intervals.icu athlete id (e.g. i58453). If GET /athlete/{id} is forbidden for OAuth, retries GET /athlete/0 (authenticated user alias per intervals.icu API).
  */
 export async function fetchIntervalsAthleteProfileWithMeta(
   accessToken: string,
@@ -215,62 +221,96 @@ export async function fetchIntervalsAthleteProfileWithMeta(
     };
     return { profile: null, meta };
   }
-  const res = await fetch(`${INTERVALS_BASE}/api/v1/athlete/${encodeURIComponent(id)}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  const text = await res.text();
-  let raw: unknown;
-  try {
-    raw = text ? JSON.parse(text) : null;
-  } catch (e) {
+
+  const paths =
+    id === '0'
+      ? [`/api/v1/athlete/0`]
+      : [`/api/v1/athlete/${encodeURIComponent(id)}`, `/api/v1/athlete/0`];
+
+  let lastMeta: IntervalsAthleteSelfMeta | null = null;
+
+  for (let i = 0; i < paths.length; i++) {
+    const path = paths[i];
+    const res = await fetch(`${INTERVALS_BASE}${path}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const text = await res.text();
+    let raw: unknown;
+    try {
+      raw = text ? JSON.parse(text) : null;
+    } catch (e) {
+      const meta: IntervalsAthleteSelfMeta = {
+        httpStatus: res.status,
+        ok: res.ok,
+        topLevelKeys: [],
+        usedNestedAthlete: false,
+        parseError: e instanceof Error ? e.message : 'json parse error',
+      };
+      lastMeta = meta;
+      const canRetry =
+        i < paths.length - 1 && shouldRetryAthleteProfileWithZero(res.status);
+      if (canRetry) continue;
+      return { profile: null, meta };
+    }
+    const topLevelKeys =
+      raw && typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+        ? Object.keys(raw as object)
+        : [];
+    const usedNestedAthlete =
+      !!raw &&
+      typeof raw === 'object' &&
+      raw !== null &&
+      'athlete' in (raw as object) &&
+      typeof (raw as { athlete?: unknown }).athlete === 'object' &&
+      (raw as { athlete?: unknown }).athlete !== null;
+    const usedAthlete0Fallback = id !== '0' && path === '/api/v1/athlete/0' && res.ok;
     const meta: IntervalsAthleteSelfMeta = {
       httpStatus: res.status,
       ok: res.ok,
-      topLevelKeys: [],
-      usedNestedAthlete: false,
-      parseError: e instanceof Error ? e.message : 'json parse error',
+      topLevelKeys,
+      usedNestedAthlete,
+      ...(usedAthlete0Fallback ? { usedAthlete0Fallback: true } : {}),
     };
-    return { profile: null, meta };
+    lastMeta = meta;
+
+    if (!res.ok || raw == null) {
+      const canRetry =
+        i < paths.length - 1 && shouldRetryAthleteProfileWithZero(res.status);
+      if (canRetry) continue;
+      return { profile: null, meta };
+    }
+
+    const data = flattenAthleteJson(raw);
+    if (!data) {
+      return { profile: null, meta };
+    }
+    const profileId = athleteIdFromPayload(data);
+    if (!profileId) {
+      return { profile: null, meta };
+    }
+    const name = displayNameFromAthletePayload(data);
+    const first_name = pickString(data, ['first_name', 'firstName', 'givenName']);
+    const last_name = pickString(data, ['last_name', 'lastName', 'familyName']);
+    return {
+      profile: {
+        id: profileId,
+        name,
+        first_name,
+        last_name,
+      },
+      meta,
+    };
   }
-  const topLevelKeys =
-    raw && typeof raw === 'object' && raw !== null && !Array.isArray(raw)
-      ? Object.keys(raw as object)
-      : [];
-  const usedNestedAthlete =
-    !!raw &&
-    typeof raw === 'object' &&
-    raw !== null &&
-    'athlete' in (raw as object) &&
-    typeof (raw as { athlete?: unknown }).athlete === 'object' &&
-    (raw as { athlete?: unknown }).athlete !== null;
-  const meta: IntervalsAthleteSelfMeta = {
-    httpStatus: res.status,
-    ok: res.ok,
-    topLevelKeys,
-    usedNestedAthlete,
-  };
-  if (!res.ok || raw == null) {
-    return { profile: null, meta };
-  }
-  const data = flattenAthleteJson(raw);
-  if (!data) {
-    return { profile: null, meta };
-  }
-  const profileId = athleteIdFromPayload(data);
-  if (!profileId) {
-    return { profile: null, meta };
-  }
-  const name = displayNameFromAthletePayload(data);
-  const first_name = pickString(data, ['first_name', 'firstName', 'givenName']);
-  const last_name = pickString(data, ['last_name', 'lastName', 'familyName']);
+
   return {
-    profile: {
-      id: profileId,
-      name,
-      first_name,
-      last_name,
-    },
-    meta,
+    profile: null,
+    meta:
+      lastMeta ?? {
+        httpStatus: 0,
+        ok: false,
+        topLevelKeys: [],
+        usedNestedAthlete: false,
+      },
   };
 }
 

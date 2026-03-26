@@ -128,8 +128,25 @@ describe('intervals-api', () => {
 	});
 
 	it('fetchIntervalsAthleteProfile returns null on failure', async () => {
-		vi.mocked(fetch).mockResolvedValue(new Response('', { status: 401 }) as Response);
+		vi.mocked(fetch)
+			.mockResolvedValueOnce(new Response('', { status: 401 }) as Response)
+			.mockResolvedValueOnce(new Response('', { status: 401 }) as Response);
 		await expect(fetchIntervalsAthleteProfile('bad', 'a1')).resolves.toBeNull();
+		expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
+	});
+
+	it('fetchIntervalsAthleteProfile falls back to athlete 0 when concrete id returns 403', async () => {
+		vi.mocked(fetch)
+			.mockResolvedValueOnce(
+				new Response(JSON.stringify({ status: 'error', error: 'forbidden' }), { status: 403 }) as Response,
+			)
+			.mockResolvedValueOnce(
+				new Response(JSON.stringify({ id: 'i58453', name: 'OAuth Name' }), { status: 200 }) as Response,
+			);
+		const p = await fetchIntervalsAthleteProfile('tok', 'i58453');
+		expect(p).toEqual({ id: 'i58453', name: 'OAuth Name' });
+		expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
+		expect(String(vi.mocked(fetch).mock.calls[1]?.[0])).toContain('/api/v1/athlete/0');
 	});
 
 	it('fetchIntervalsAthleteProfile returns null when athleteId empty', async () => {

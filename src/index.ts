@@ -843,6 +843,7 @@ async function verifyIntervalsToken(bearerToken: string): Promise<string | null>
   if (jwtId) {
     urls.push(`https://intervals.icu/api/v1/athlete/${encodeURIComponent(jwtId)}`);
   }
+  urls.push('https://intervals.icu/api/v1/athlete/0');
   urls.push('https://intervals.icu/api/v1/athlete/self');
   for (const url of urls) {
     const res = await fetch(url, {
