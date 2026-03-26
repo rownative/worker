@@ -42,6 +42,13 @@ function corsAllowOrigin(request: Request): string {
   return isLocalOrigin(origin) ? origin : 'https://rownative.icu';
 }
 
+/** For a clear error when `.dev.vars` is missing (local `wrangler dev` does not use `wrangler secret`). */
+function missingIntervalsOAuthEnv(env: Env): string | null {
+  if (!env.INTERVALS_CLIENT_ID?.trim()) return 'INTERVALS_CLIENT_ID';
+  if (!env.INTERVALS_CLIENT_SECRET?.trim()) return 'INTERVALS_CLIENT_SECRET';
+  return null;
+}
+
 /** Only http(s) to localhost or loopback; prevents open redirects via return_to. */
 function safeLocalReturnTo(raw: string | null): string | null {
   if (!raw || !raw.trim()) return null;
@@ -298,6 +305,13 @@ export default {
 
     // OAuth login — redirect to intervals.icu (with state for CSRF protection)
     if (path === '/oauth/authorize') {
+      const missingOAuth = missingIntervalsOAuthEnv(env);
+      if (missingOAuth) {
+        return new Response(
+          `OAuth not configured: ${missingOAuth} is empty. For local dev, copy .dev.vars.example to .dev.vars and set values (wrangler secret put does not apply to npm run dev). See README.`,
+          { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' } },
+        );
+      }
       const localParam = url.searchParams.get('local') === '1';
       const hostHeader = request.headers.get('Host') ?? '';
       const hostName = hostnameFromHostHeader(hostHeader);
@@ -354,6 +368,14 @@ export default {
       const returnTo = safeLocalReturnTo(returnToRaw);
 
       const redirectUri = isLocal ? 'http://localhost:8787/oauth/callback' : 'https://rownative.icu/oauth/callback';
+
+      const missingOAuthCb = missingIntervalsOAuthEnv(env);
+      if (missingOAuthCb) {
+        return new Response(
+          `OAuth not configured: ${missingOAuthCb} is empty. Copy .dev.vars.example to .dev.vars and set values. See README.`,
+          { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' } },
+        );
+      }
 
       // Exchange code for tokens
       const tokenRes = await fetch('https://intervals.icu/api/oauth/token', {
@@ -1479,6 +1501,20 @@ function courseNameById(courses: Array<{ id: string; name?: string }>, id: strin
   return c?.name ?? `Course ${id}`;
 }
 
+/** Course index row (GitHub `courses/index.json`) — used for map preview and distance on challenge cards. */
+function courseIndexFields(
+  courses: Array<{ id: string; name?: string; center_lat?: number; center_lon?: number; distance_m?: number }>,
+  courseId: string,
+): { center_lat?: number; center_lon?: number; distance_m?: number } {
+  const c = courses.find((x) => String(x.id) === String(courseId));
+  if (!c) return {};
+  const out: { center_lat?: number; center_lon?: number; distance_m?: number } = {};
+  if (typeof c.center_lat === 'number') out.center_lat = c.center_lat;
+  if (typeof c.center_lon === 'number') out.center_lon = c.center_lon;
+  if (typeof c.distance_m === 'number') out.distance_m = c.distance_m;
+  return out;
+}
+
 const BUILTIN_COLLECTIONS: Record<string, string> = {
   hocr: 'HOCR',
   fisa: 'FISA Masters',
@@ -1491,14 +1527,18 @@ function collectionNameById(id: string | null, custom: Map<string, string>): str
   return custom.get(id) ?? id;
 }
 
-function challengeToApi(row: Record<string, unknown>, courses: Array<{ id: string; name?: string }>, collectionNames: Map<string, string>): Record<string, unknown> {
+function challengeToApi(row: Record<string, unknown>, courses: Array<{ id: string; name?: string; center_lat?: number; center_lon?: number; distance_m?: number }>, collectionNames: Map<string, string>): Record<string, unknown> {
   const courseId = String(row.course_id ?? '');
   const collectionId = row.collection_id ? String(row.collection_id) : null;
+  const courseFields = courseIndexFields(courses, courseId);
   return {
     id: row.id,
     name: row.name,
     courseId,
     courseName: courseNameById(courses, courseId),
+    center_lat: courseFields.center_lat,
+    center_lon: courseFields.center_lon,
+    distance_m: courseFields.distance_m,
     rowStart: row.row_start,
     rowEnd: row.row_end,
     submitEnd: row.submit_end,
@@ -1512,7 +1552,7 @@ function challengeToApi(row: Record<string, unknown>, courses: Array<{ id: strin
   };
 }
 
-function challengeDetailToApi(row: Record<string, unknown>, courses: Array<{ id: string; name?: string }>, collectionNames: Map<string, string>): Record<string, unknown> {
+function challengeDetailToApi(row: Record<string, unknown>, courses: Array<{ id: string; name?: string; center_lat?: number; center_lon?: number; distance_m?: number }>, collectionNames: Map<string, string>): Record<string, unknown> {
   const base = challengeToApi(row, courses, collectionNames);
   return { ...base, organizerName: null };
 }

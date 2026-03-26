@@ -1,0 +1,12 @@
+# Copy to .dev.vars and fill in (wrangler loads .dev.vars for `npm run dev` only).
+# Secrets from `wrangler secret put` are NOT used automatically in local dev.
+#
+# Get OAuth credentials from https://intervals.icu → Developer Settings → your app.
+# Add redirect URI: http://localhost:8787/oauth/callback
+
+INTERVALS_CLIENT_ID=
+INTERVALS_CLIENT_SECRET=
+TOKEN_ENCRYPTION_KEY=
+
+# Optional: course import / submit / update against GitHub
+# GITHUB_TOKEN=

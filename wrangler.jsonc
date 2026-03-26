@@ -30,7 +30,17 @@
 	"routes": [
 		{ "pattern": "rownative.icu/api/*", "zone_name": "rownative.icu" },
 		{ "pattern": "rownative.icu/oauth/*", "zone_name": "rownative.icu" }
-	]
+	],
+	/**
+	 * Default bindings so `env.INTERVALS_*` is never undefined (avoids client_id=undefined in OAuth URLs).
+	 * Production: override with `wrangler secret put` (secrets take precedence).
+	 * Local real OAuth: use `.dev.vars` with real intervals.icu credentials (overrides these defaults).
+	 */
+	"vars": {
+		"INTERVALS_CLIENT_ID": "configure-via-secret-or-dev-vars",
+		"INTERVALS_CLIENT_SECRET": "configure-via-secret-or-dev-vars",
+		"TOKEN_ENCRYPTION_KEY": "00000000000000000000000000000000"
+	}
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement

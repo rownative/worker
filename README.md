@@ -142,6 +142,21 @@ npm run deploy  # deploy to Cloudflare Workers
 
 Local dev uses Miniflare with the same wrangler config. Ensure `wrangler.jsonc` includes a KV namespace binding for tests (or use a separate dev namespace).
 
+### OAuth and secrets locally (`client_id=undefined`)
+
+`wrangler secret put` applies to **deployed** Workers only. For **`npm run dev`**, Wrangler reads **[`.dev.vars`](https://developers.cloudflare.com/workers/wrangler/configuration/#secrets)** (gitignored).
+
+1. Copy `.dev.vars.example` to `.dev.vars`.
+2. Set `INTERVALS_CLIENT_ID`, `INTERVALS_CLIENT_SECRET`, and `TOKEN_ENCRYPTION_KEY` (same values you use in production secrets, or a dev OAuth app).
+3. In your intervals.icu app settings, add redirect URI **`http://localhost:8787/oauth/callback`** (in addition to production if needed).
+4. Restart `npm run dev`.
+
+If `INTERVALS_CLIENT_ID` is missing, the authorize URL sent to intervals.icu will contain `client_id=undefined` and their server will error.
+
+### Frontend against local Worker
+
+From the **courses** repo, run `npm run dev` for the static site, then open the URL documented in [courses `CONTRIBUTING.md` — Local development with real Worker](https://github.com/rownative/courses/blob/main/CONTRIBUTING.md) (`?debug=1&api=http://localhost:8787/api`).
+
 ## Contributing
 
 We welcome contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to propose changes, run tests, and open pull requests.
