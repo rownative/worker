@@ -255,7 +255,7 @@ export default {
         athleteId: string | null;
         liked: string[];
         isOrganizer?: boolean;
-        athleteDisplayName?: string;
+        athleteDisplayName?: string | null;
         _debug?: { intervalsAthleteSelf: IntervalsAthleteSelfMeta; profile?: { id: string; hasName: boolean; hasFirst: boolean; hasLast: boolean } | null };
       };
       if (athleteId) {
