@@ -6,6 +6,22 @@
 npx wrangler deploy
 ```
 
+### Deploying without losing secrets or dashboard variables
+
+- **Secrets** (`INTERVALS_CLIENT_ID`, `INTERVALS_CLIENT_SECRET`, `TOKEN_ENCRYPTION_KEY`, `GITHUB_TOKEN`, …) set in the Cloudflare dashboard or via `wrangler secret put` are **not deleted** when you deploy. A normal `wrangler deploy` updates **code and config** (routes, bindings); it does not wipe remote secrets.
+
+- If Wrangler **prompts** about replacing or syncing values that conflict with what is in [`wrangler.jsonc`](wrangler.jsonc) `vars` (e.g. the placeholder `INTERVALS_*` strings), choose the option that **keeps** your existing Cloudflare secrets / production values, or cancel and fix the prompt cause (see below).
+
+- **Plain Variables** (non-secret) you added only in the dashboard can be removed on deploy: Wrangler’s default is to align `vars` with the config file. If you rely on **dashboard-only** vars, deploy with:
+  ```bash
+  npx wrangler deploy --keep-vars
+  ```
+  so existing environment variables are not cleared before applying values from `wrangler.jsonc`. (Secrets are still never deleted by deployments.)
+
+- **Avoid** passing sensitive values with `--var KEY=value` on the command line (shell history, CI logs).
+
+- **Optional cleanup:** The repo uses placeholder `vars` for `INTERVALS_*` so local dev never sees `undefined`. If deploy keeps asking to reconcile those names with your **secrets**, you can remove those keys from `vars` in `wrangler.jsonc` and rely on `.dev.vars` locally + secrets remotely—then there is nothing to “overwrite” at deploy time.
+
 ## First-time setup (Phase 2a — course times)
 
 ### Check if D1 already exists
