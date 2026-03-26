@@ -640,33 +640,27 @@ export default {
       return withCors(await handleCreateStandardCollection(request, athleteId, env), request);
     }
 
-    // GET /api/organiser/challenges/:id/results — all results including pending (organiser only)
+    // GET /api/organiser/challenges/:id/results — challenge organiser only (handler checks organizer_id)
     const organiserResultsMatch = path.match(/^\/api\/organiser\/challenges\/([^/]+)\/results\/?$/);
     if (organiserResultsMatch && request.method === 'GET') {
       const athleteId = await getAthleteIdFromRequest(request, env);
       if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
-      const isOrg = await isOrganizer(athleteId, env, request);
-      if (!isOrg) return withCors(jsonResponse({ error: 'Organiser access required' }, 403, true), request);
       return withCors(await handleOrganiserChallengeResults(organiserResultsMatch[1], athleteId, env), request);
     }
 
-    // POST /api/organiser/results/:id/override — approve or disqualify
+    // POST /api/organiser/results/:id/override — approve or disqualify (handler checks challenge organiser)
     const organiserOverrideMatch = path.match(/^\/api\/organiser\/results\/([^/]+)\/override\/?$/);
     if (organiserOverrideMatch && request.method === 'POST') {
       const athleteId = await getAthleteIdFromRequest(request, env);
       if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
-      const isOrg = await isOrganizer(athleteId, env, request);
-      if (!isOrg) return withCors(jsonResponse({ error: 'Organiser access required' }, 403, true), request);
       return withCors(await handleOrganiserResultOverride(request, organiserOverrideMatch[1], athleteId, env), request);
     }
 
-    // GET /api/organiser/results/:id/track — track overlay for moderation
+    // GET /api/organiser/results/:id/track — track overlay for moderation (handler checks challenge organiser)
     const organiserTrackMatch = path.match(/^\/api\/organiser\/results\/([^/]+)\/track\/?$/);
     if (organiserTrackMatch && request.method === 'GET') {
       const athleteId = await getAthleteIdFromRequest(request, env);
       if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
-      const isOrg = await isOrganizer(athleteId, env, request);
-      if (!isOrg) return withCors(jsonResponse({ error: 'Organiser access required' }, 403, true), request);
       return withCors(await handleOrganiserResultTrack(organiserTrackMatch[1], athleteId, env), request);
     }
 
