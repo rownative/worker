@@ -4,9 +4,11 @@
 	"private": true,
 	"scripts": {
 		"deploy": "wrangler deploy",
+		"predev": "wrangler d1 migrations apply rowing-courses-db --local",
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
 		"test": "vitest run",
+		"test:coverage": "vitest run --coverage",
 		"cf-typegen": "wrangler types"
 	},
 	"dependencies": {
@@ -16,6 +18,7 @@
 		"@cloudflare/vitest-pool-workers": "^0.12.4",
 		"@types/node": "^25.5.0",
 		"typescript": "^5.5.2",
+		"@vitest/coverage-istanbul": "~3.2.0",
 		"vitest": "~3.2.0",
 		"wrangler": "^4.74.0"
 	}

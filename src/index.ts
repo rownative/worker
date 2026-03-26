@@ -1,16 +1,152 @@
 import { unzipSync } from 'fflate';
-import { kmlToCourse, haversine } from './kml-to-course';
+import { kmlToCourse, haversine, type CourseFromKml } from './kml-to-course';
 import { calculateCourseTime, type TrackPoint } from './course-time';
+import { computeHandicap } from './handicap';
 import {
   fetchIntervalsActivities,
+  fetchIntervalsActivity,
+  fetchIntervalsAthleteProfile,
+  fetchIntervalsAthleteProfileWithMeta,
   fetchIntervalsStreams,
   isOtwRowing,
   type IntervalsActivity,
+  type IntervalsAthleteSelfMeta,
 } from './intervals-api';
+import { isNameAllowed } from './content-filter';
 
 // Rowing courses API
 const COURSES_BASE = 'https://raw.githubusercontent.com/rownative/courses/main';
 const GITHUB_API = 'https://api.github.com';
+const ORGANISERS_CACHE_KEY = 'organisers:list';
+const ORGANISERS_CACHE_TTL = 300; // 5 minutes
+
+const MAX_ZIP_UPLOAD_BYTES = 10 * 1024 * 1024;
+const MAX_KML_UPLOAD_BYTES = 1 * 1024 * 1024;
+
+function isLocalHostname(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h === '::1';
+}
+
+function isLocalOrigin(origin: string): boolean {
+  if (!origin) return false;
+  try {
+    const u = new URL(origin);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    return isLocalHostname(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function corsAllowOrigin(request: Request): string {
+  const origin = request.headers.get('Origin') ?? '';
+  return isLocalOrigin(origin) ? origin : 'https://rownative.icu';
+}
+
+/** For a clear error when `.dev.vars` is missing (local `wrangler dev` does not use `wrangler secret`). */
+function missingIntervalsOAuthEnv(env: Env): string | null {
+  if (!env.INTERVALS_CLIENT_ID?.trim()) return 'INTERVALS_CLIENT_ID';
+  if (!env.INTERVALS_CLIENT_SECRET?.trim()) return 'INTERVALS_CLIENT_SECRET';
+  return null;
+}
+
+/** Only http(s) to localhost or loopback; prevents open redirects via return_to. */
+function safeLocalReturnTo(raw: string | null): string | null {
+  if (!raw || !raw.trim()) return null;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    if (!isLocalHostname(u.hostname)) return null;
+    return u.href;
+  } catch {
+    return null;
+  }
+}
+
+/** intervals.icu redirect_uri for local dev — must match this worker's origin (wrangler may use 8788 if 8787 is taken). */
+function oauthRedirectUri(request: Request, isLocal: boolean): string {
+  if (!isLocal) return 'https://rownative.icu/oauth/callback';
+  const u = new URL(request.url);
+  if (!isLocalHostname(u.hostname)) return 'http://localhost:8787/oauth/callback';
+  return `${u.origin}/oauth/callback`;
+}
+
+function hostnameFromHostHeader(host: string): string | null {
+  if (!host) return null;
+  try {
+    return new URL(`http://${host}`).hostname;
+  } catch {
+    return null;
+  }
+}
+
+function isLocalDevRequest(request: Request, requestUrl: URL): boolean {
+  const host = request.headers.get('Host') ?? '';
+  const origin = request.headers.get('Origin') ?? '';
+  const hn = hostnameFromHostHeader(host);
+  if (hn && isLocalHostname(hn)) return true;
+  if (isLocalOrigin(origin)) return true;
+  if (isLocalHostname(requestUrl.hostname)) return true;
+  return false;
+}
+
+function uint8ToBase64(bytes: Uint8Array): string {
+  const chunk = 8192;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+function base64UrlToBytes(s: string): Uint8Array | null {
+  let b64 = s.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = b64.length % 4;
+  if (pad) b64 += '='.repeat(4 - pad);
+  try {
+    const binary = atob(b64);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+async function verifyApiKeyMac(athleteId: string, macBase64Url: string, secret: string): Promise<boolean> {
+  const sig = base64UrlToBytes(macBase64Url);
+  if (!sig) return false;
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['verify'],
+  );
+  try {
+    return await crypto.subtle.verify(
+      { name: 'HMAC', hash: 'SHA-256' },
+      key,
+      sig,
+      new TextEncoder().encode(athleteId),
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function githubApiError(res: Response): Promise<string> {
+  const text = await res.text();
+  let msg: string;
+  try {
+    const j = JSON.parse(text) as { message?: string };
+    msg = j.message ?? text;
+  } catch {
+    msg = text || res.statusText;
+  }
+  return `GitHub API (${res.status}): ${msg}`;
+}
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -19,8 +155,7 @@ export default {
 
     // CORS preflight — required for credentialed POST from localhost
     if (request.method === 'OPTIONS') {
-      const origin = request.headers.get('Origin') ?? '';
-      const allowOrigin = origin.includes('localhost') || origin.includes('127.0.0.1') ? origin : 'https://rownative.icu';
+      const allowOrigin = corsAllowOrigin(request);
       return new Response(null, {
         status: 204,
         headers: {
@@ -57,10 +192,12 @@ export default {
           })
         : courses;
 
-      return new Response(JSON.stringify(filtered), {
+      const allowOrigin = corsAllowOrigin(request);
+      return new Response(JSON.stringify({ courses: filtered }), {
         headers: {
           'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Origin': allowOrigin,
+          'Access-Control-Allow-Credentials': 'true',
         },
       });
     }
@@ -111,12 +248,59 @@ export default {
 
     // GET /api/me — 200 with null when unauthenticated (avoids console noise)
     if (path === '/api/me' || path === '/api/me/') {
+      const meUrl = new URL(request.url);
+      const debugMe = meUrl.searchParams.get('debug') === '1';
       const athleteId = await getAthleteIdFromRequest(request, env);
-      const payload = athleteId
-        ? { athleteId, liked: JSON.parse((await env.ROWING_COURSES.get(`liked:${athleteId}`)) ?? '[]') }
-        : { athleteId: null, liked: [] };
-      const origin = request.headers.get('Origin') ?? '';
-      const allowOrigin = origin.includes('localhost') || origin.includes('127.0.0.1') ? origin : 'https://rownative.icu';
+      let payload: {
+        athleteId: string | null;
+        liked: string[];
+        isOrganizer?: boolean;
+        athleteDisplayName?: string | null;
+        _debug?: { intervalsAthleteSelf: IntervalsAthleteSelfMeta; profile?: { id: string; hasName: boolean; hasFirst: boolean; hasLast: boolean } | null };
+      };
+      if (athleteId) {
+        const session = await getSessionFromRequest(request, env);
+        let athleteDisplayName: string | undefined;
+        let intervalsMeta: IntervalsAthleteSelfMeta | undefined;
+        let profileSummary: { id: string; hasName: boolean; hasFirst: boolean; hasLast: boolean } | null = null;
+        if (session?.accessToken) {
+          const { profile, meta } = await fetchIntervalsAthleteProfileWithMeta(session.accessToken, athleteId);
+          intervalsMeta = meta;
+          if (profile) {
+            const fromParts = [profile.first_name, profile.last_name]
+              .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+              .map((s) => s.trim())
+              .join(' ');
+            athleteDisplayName = profile.name?.trim() || fromParts || undefined;
+            profileSummary = {
+              id: profile.id,
+              hasName: !!profile.name?.trim(),
+              hasFirst: !!profile.first_name?.trim(),
+              hasLast: !!profile.last_name?.trim(),
+            };
+          }
+          if (!athleteDisplayName && session.oauthAthleteName?.trim()) {
+            athleteDisplayName = session.oauthAthleteName.trim();
+          }
+        }
+        const [liked, isOrg] = await Promise.all([
+          env.ROWING_COURSES.get(`liked:${athleteId}`).then((v) => JSON.parse(v ?? '[]') as string[]),
+          isOrganizer(athleteId, env, request),
+        ]);
+        // Always include athleteDisplayName (null if unresolved) — JSON.stringify omits undefined keys.
+        payload = {
+          athleteId,
+          liked,
+          isOrganizer: isOrg,
+          athleteDisplayName: athleteDisplayName ?? null,
+        };
+        if (debugMe && intervalsMeta) {
+          payload._debug = { intervalsAthleteSelf: intervalsMeta, profile: profileSummary };
+        }
+      } else {
+        payload = { athleteId: null, liked: [], isOrganizer: false, athleteDisplayName: null };
+      }
+      const allowOrigin = corsAllowOrigin(request);
       return new Response(JSON.stringify(payload), {
         headers: {
           'Content-Type': 'application/json',
@@ -145,12 +329,11 @@ export default {
     if (path === '/oauth/debug') {
       const localParam = url.searchParams.get('local') === '1';
       const hostHeader = request.headers.get('Host') ?? '';
-      const isLocalByHost = hostHeader.startsWith('localhost') || hostHeader.startsWith('127.0.0.1');
-      const isLocalByUrl = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+      const hostName = hostnameFromHostHeader(hostHeader);
+      const isLocalByHost = hostName !== null && isLocalHostname(hostName);
+      const isLocalByUrl = isLocalHostname(url.hostname);
       const isLocal = localParam || isLocalByHost || isLocalByUrl;
-      const redirectUri = isLocal
-        ? 'http://localhost:8787/oauth/callback'
-        : 'https://rownative.icu/oauth/callback';
+      const redirectUri = oauthRedirectUri(request, isLocal);
       return new Response(
         JSON.stringify({
           redirect_uri: redirectUri,
@@ -165,22 +348,33 @@ export default {
 
     // OAuth login — redirect to intervals.icu (with state for CSRF protection)
     if (path === '/oauth/authorize') {
+      const missingOAuth = missingIntervalsOAuthEnv(env);
+      if (missingOAuth) {
+        return new Response(
+          `OAuth not configured: ${missingOAuth} is empty. For local dev, copy .dev.vars.example to .dev.vars and set values (wrangler secret put does not apply to npm run dev). See README.`,
+          { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' } },
+        );
+      }
       const localParam = url.searchParams.get('local') === '1';
       const hostHeader = request.headers.get('Host') ?? '';
-      const isLocal = localParam || hostHeader.startsWith('localhost') || hostHeader.startsWith('127.0.0.1')
-        || url.hostname === 'localhost' || url.hostname === '127.0.0.1';
-      const redirectUri = isLocal ? 'http://localhost:8787/oauth/callback' : 'https://rownative.icu/oauth/callback';
+      const hostName = hostnameFromHostHeader(hostHeader);
+      const isLocal = localParam
+        || (hostName !== null && isLocalHostname(hostName))
+        || isLocalHostname(url.hostname);
+      const redirectUri = oauthRedirectUri(request, isLocal);
       const state = crypto.randomUUID();
-      const returnTo = url.searchParams.get('return_to');
+      const returnToParam = url.searchParams.get('return_to');
+      const safeReturn = safeLocalReturnTo(returnToParam);
       console.log(`[oauth] authorize: generated state=${state}, redirect_uri=${redirectUri}`);
       // Store state in KV; value 'local' or 'local:<returnTo>' signals local dev
-      const stateVal = isLocal ? (returnTo ? `local:${returnTo}` : 'local') : '1';
+      const stateVal = isLocal ? (safeReturn ? `local:${safeReturn}` : 'local') : '1';
       await env.ROWING_COURSES.put(`oauth_state:${state}`, stateVal, { expirationTtl: 600 });
       const params = new URLSearchParams({
         client_id: env.INTERVALS_CLIENT_ID,
         redirect_uri: redirectUri,
         response_type: 'code',
-        scope: 'ACTIVITY:READ',
+        // ACTIVITY: streams/activities; SETTINGS: athlete profile GET (forum: "Athlete settings")
+        scope: 'ACTIVITY:READ,SETTINGS:READ',
         state,
       });
       const stateCookieSecure = isLocal ? '' : '; Secure';
@@ -214,9 +408,18 @@ export default {
       }
       await env.ROWING_COURSES.delete(`oauth_state:${state}`);
       const isLocal = kvVal === 'local' || (typeof kvVal === 'string' && kvVal.startsWith('local:'));
-      const returnTo = (typeof kvVal === 'string' && kvVal.startsWith('local:')) ? kvVal.slice(6) : null;
+      const returnToRaw = (typeof kvVal === 'string' && kvVal.startsWith('local:')) ? kvVal.slice(6) : null;
+      const returnTo = safeLocalReturnTo(returnToRaw);
 
-      const redirectUri = isLocal ? 'http://localhost:8787/oauth/callback' : 'https://rownative.icu/oauth/callback';
+      const redirectUri = oauthRedirectUri(request, isLocal);
+
+      const missingOAuthCb = missingIntervalsOAuthEnv(env);
+      if (missingOAuthCb) {
+        return new Response(
+          `OAuth not configured: ${missingOAuthCb} is empty. Copy .dev.vars.example to .dev.vars and set values. See README.`,
+          { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' } },
+        );
+      }
 
       // Exchange code for tokens
       const tokenRes = await fetch('https://intervals.icu/api/oauth/token', {
@@ -235,14 +438,23 @@ export default {
         return new Response(`Token exchange failed: ${tokenRes.status} ${body}`, { status: 500 });
       }
 
-      // Athlete ID is included in the token response — no separate profile call needed
+      // Token response includes athlete id + name (see intervals.icu OAuth docs) — persist name for /api/me when GET /athlete/* returns 403.
       const tokens = await tokenRes.json() as {
         access_token: string;
-        scope: string;
-        athlete: { id: string; name: string };
+        scope?: string;
+        athlete?: { id?: string | number; name?: string };
       };
-
-      const athleteId = tokens.athlete.id;
+      if (!tokens.access_token) {
+        return new Response('Token exchange: missing access_token', { status: 500 });
+      }
+      const ath = tokens.athlete;
+      if (!ath || ath.id == null) {
+        return new Response('Token exchange: missing athlete', { status: 500 });
+      }
+      const athleteId =
+        typeof ath.id === 'number' && Number.isFinite(ath.id) ? String(ath.id) : String(ath.id).trim();
+      const oauthAthleteName =
+        typeof ath.name === 'string' && ath.name.trim() ? ath.name.trim() : undefined;
 
       // Encrypt session and set cookie
       // intervals.icu does not use refresh tokens or expiry — store access token only
@@ -251,6 +463,7 @@ export default {
         accessToken: tokens.access_token,
         refreshToken: '',
         expiresAt: 0, // no expiry
+        ...(oauthAthleteName ? { oauthAthleteName } : {}),
       };
       const cookie = await encryptSession(session, env.TOKEN_ENCRYPTION_KEY);
       const postAuthRedirect = (isLocal && returnTo) ? returnTo : (isLocal ? 'http://localhost:8080/' : '/');
@@ -266,11 +479,14 @@ export default {
     // OAuth logout
     if (path === '/oauth/logout') {
       const localParam = url.searchParams.get('local') === '1';
-      const returnTo = url.searchParams.get('return_to');
+      const returnToParam = url.searchParams.get('return_to');
+      const safeReturn = safeLocalReturnTo(returnToParam);
       const hostHeader = request.headers.get('Host') ?? '';
-      const isLocal = localParam || hostHeader.startsWith('localhost') || hostHeader.startsWith('127.0.0.1')
-        || url.hostname === 'localhost' || url.hostname === '127.0.0.1';
-      const logoutRedirect = (isLocal && returnTo) ? returnTo : (isLocal ? 'http://localhost:8080/' : '/');
+      const hostName = hostnameFromHostHeader(hostHeader);
+      const isLocal = localParam
+        || (hostName !== null && isLocalHostname(hostName))
+        || isLocalHostname(url.hostname);
+      const logoutRedirect = (isLocal && safeReturn) ? safeReturn : (isLocal ? 'http://localhost:8080/' : '/');
       const logoutCookieSecure = isLocal ? '' : '; Secure';
       return new Response(null, {
         status: 302,
@@ -317,7 +533,7 @@ export default {
       const activityId = trackMatch[1];
       const session = await getSessionFromRequest(request, env);
       if (!session) return jsonResponse({ error: 'Unauthorised' }, 401, true, request);
-      return withCors(await handleGetActivityTrack(activityId, session, env), request);
+      return withCors(await handleGetActivityTrack(activityId, session), request);
     }
 
     // GET /api/me/activities — OTW rowing, last month
@@ -359,6 +575,93 @@ export default {
       const athleteId = await getAthleteIdFromRequest(request, env);
       if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true, request);
       return withCors(await handleDeleteCourseTime(timeId, athleteId, env), request);
+    }
+
+    // GET /api/challenges?status=active|upcoming|past
+    const challengesListMatch = path.match(/^\/api\/challenges\/?$/);
+    if (challengesListMatch && request.method === 'GET') {
+      const status = url.searchParams.get('status') || 'active';
+      const validStatus = ['active', 'upcoming', 'past'].includes(status) ? status : 'active';
+      return withCors(await handleListChallenges(validStatus, env), request);
+    }
+
+    // GET /api/challenges/:id/results
+    const challengeResultsMatch = path.match(/^\/api\/challenges\/([^/]+)\/results\/?$/);
+    if (challengeResultsMatch && request.method === 'GET') {
+      const challengeId = challengeResultsMatch[1];
+      return withCors(await handleChallengeResults(challengeId, env), request);
+    }
+
+    // POST /api/challenges/:id/submit
+    const challengeSubmitMatch = path.match(/^\/api\/challenges\/([^/]+)\/submit\/?$/);
+    if (challengeSubmitMatch && request.method === 'POST') {
+      const challengeId = challengeSubmitMatch[1];
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
+      return withCors(await handleChallengeSubmit(request, challengeId, athleteId, env), request);
+    }
+
+    // GET /api/challenges/:id
+    const challengeDetailMatch = path.match(/^\/api\/challenges\/([^/]+)\/?$/);
+    if (challengeDetailMatch && request.method === 'GET') {
+      const challengeId = challengeDetailMatch[1];
+      return withCors(await handleChallengeDetail(challengeId, env), request);
+    }
+
+    // GET /api/organiser/challenges
+    if ((path === '/api/organiser/challenges' || path === '/api/organiser/challenges/') && request.method === 'GET') {
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
+      return withCors(await handleOrganiserChallengesList(athleteId, env), request);
+    }
+
+    // POST /api/organiser/challenges
+    if ((path === '/api/organiser/challenges' || path === '/api/organiser/challenges/') && request.method === 'POST') {
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
+      const isOrg = await isOrganizer(athleteId, env, request);
+      if (!isOrg) return withCors(jsonResponse({ error: 'Organiser access required' }, 403, true), request);
+      return withCors(await handleCreateChallenge(request, athleteId, env, ctx), request);
+    }
+
+    // GET /api/organiser/standard-collections
+    if ((path === '/api/organiser/standard-collections' || path === '/api/organiser/standard-collections/') && request.method === 'GET') {
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
+      return withCors(await handleListStandardCollections(env), request);
+    }
+
+    // POST /api/organiser/standard-collections
+    if ((path === '/api/organiser/standard-collections' || path === '/api/organiser/standard-collections/') && request.method === 'POST') {
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
+      const isOrg = await isOrganizer(athleteId, env, request);
+      if (!isOrg) return withCors(jsonResponse({ error: 'Organiser access required' }, 403, true), request);
+      return withCors(await handleCreateStandardCollection(request, athleteId, env), request);
+    }
+
+    // GET /api/organiser/challenges/:id/results — challenge organiser only (handler checks organizer_id)
+    const organiserResultsMatch = path.match(/^\/api\/organiser\/challenges\/([^/]+)\/results\/?$/);
+    if (organiserResultsMatch && request.method === 'GET') {
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
+      return withCors(await handleOrganiserChallengeResults(organiserResultsMatch[1], athleteId, env), request);
+    }
+
+    // POST /api/organiser/results/:id/override — approve or disqualify (handler checks challenge organiser)
+    const organiserOverrideMatch = path.match(/^\/api\/organiser\/results\/([^/]+)\/override\/?$/);
+    if (organiserOverrideMatch && request.method === 'POST') {
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
+      return withCors(await handleOrganiserResultOverride(request, organiserOverrideMatch[1], athleteId, env), request);
+    }
+
+    // GET /api/organiser/results/:id/track — track overlay for moderation (handler checks challenge organiser)
+    const organiserTrackMatch = path.match(/^\/api\/organiser\/results\/([^/]+)\/track\/?$/);
+    if (organiserTrackMatch && request.method === 'GET') {
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
+      return withCors(await handleOrganiserResultTrack(organiserTrackMatch[1], athleteId, env), request);
     }
 
     return new Response('Not found', { status: 404 });
@@ -415,12 +718,92 @@ async function getAthleteIdFromRequest(request: Request, env: Env): Promise<stri
     if (dot === -1) return null;
     const athleteId = key.slice(0, dot);
     const mac = key.slice(dot + 1);
-    const expected = await apiKeyForAthlete(athleteId, env.TOKEN_ENCRYPTION_KEY);
-    const expectedMac = expected.slice(expected.indexOf('.') + 1);
-    if (mac !== expectedMac) return null;
+    const ok = await verifyApiKeyMac(athleteId, mac, env.TOKEN_ENCRYPTION_KEY);
+    if (!ok) return null;
     return athleteId;
   }
   return null;
+}
+
+/** Fetch organisers.json from GitHub, cached in KV. Returns set of athlete IDs. */
+async function getOrganiserIds(env: Env): Promise<Set<string>> {
+  const cached = await env.ROWING_COURSES.get(ORGANISERS_CACHE_KEY);
+  if (cached) {
+    try {
+      const arr = JSON.parse(cached) as unknown;
+      const ids = Array.isArray(arr) ? arr.map((x) => String(x)) : [];
+      return new Set(ids);
+    } catch {
+      // fall through to fetch
+    }
+  }
+  const res = await fetch(`${COURSES_BASE}/courses/organisers.json`);
+  if (!res.ok) {
+    return new Set();
+  }
+  try {
+    const arr = (await res.json()) as unknown;
+    const ids = Array.isArray(arr) ? arr.map((x) => String(x)) : [];
+    await env.ROWING_COURSES.put(ORGANISERS_CACHE_KEY, JSON.stringify(ids), {
+      expirationTtl: ORGANISERS_CACHE_TTL,
+    });
+    return new Set(ids);
+  } catch {
+    return new Set();
+  }
+}
+
+/** Check if athlete is an organiser (from organisers.json). */
+async function isOrganizer(athleteId: string, env: Env, request?: Request): Promise<boolean> {
+  if (request) {
+    const reqUrl = new URL(request.url);
+    if (isLocalDevRequest(request, reqUrl)) {
+      return true; // dev: any signed-in user can act as organiser
+    }
+  }
+  const ids = await getOrganiserIds(env);
+  return ids.has(athleteId);
+}
+
+/** Create a GitHub issue to notify admins of a new challenge. Fire-and-forget; failures are ignored. */
+async function notifyAdminsNewChallenge(
+  env: Env,
+  challenge: { id: string; name: string; courseId: string; rowStart: string; rowEnd: string; submitEnd: string; athleteId: string }
+): Promise<void> {
+  const token = env.GITHUB_TOKEN;
+  if (!token) return;
+  const repo = env.GITHUB_REPO ?? 'rownative/courses';
+  const [owner, repoName] = repo.split('/');
+  if (!owner || !repoName) return;
+
+  const viewUrl = `https://rownative.icu/challenge.html?id=${encodeURIComponent(challenge.id)}`;
+  const title = `New challenge: ${challenge.name}`;
+  const body = `Challenge created by organiser (athlete ID: ${challenge.athleteId}).
+
+- **Name:** ${challenge.name}
+- **Course:** ${challenge.courseId}
+- **Row window:** ${challenge.rowStart} – ${challenge.rowEnd}
+- **Submit deadline:** ${challenge.submitEnd}
+- **View:** ${viewUrl}`;
+
+  try {
+    const res = await fetch(`${GITHUB_API}/repos/${owner}/${repoName}/issues`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'Content-Type': 'application/json',
+        'User-Agent': 'rownative-worker',
+      },
+      body: JSON.stringify({ title, body }),
+    });
+    if (!res.ok) {
+      console.error('[notifyAdminsNewChallenge] GitHub API error:', res.status, await res.text());
+    }
+  } catch (e) {
+    console.error('[notifyAdminsNewChallenge] Failed:', e);
+  }
 }
 
 /** Get session from cookie (browser auth). Returns null for API key. */
@@ -437,18 +820,49 @@ async function apiKeyForAthlete(athleteId: string, secret: string): Promise<stri
     { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
   );
   const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(athleteId));
-  const mac = btoa(String.fromCharCode(...new Uint8Array(sig)))
+  const mac = uint8ToBase64(new Uint8Array(sig))
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
   return `${athleteId}.${mac}`;
 }
 
+/** If bearer is a JWT, try to read athlete id for /api/v1/athlete/{id} (self often 403 for OAuth). */
+function tryIntervalsJwtAthleteId(bearerToken: string): string | null {
+  const parts = bearerToken.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const pad = b64.length % 4 === 0 ? '' : '='.repeat(4 - (b64.length % 4));
+    const json = atob(b64 + pad);
+    const p = JSON.parse(json) as Record<string, unknown>;
+    for (const k of ['athleteId', 'athlete_id', 'sub']) {
+      const v = p[k];
+      if (typeof v === 'string' && v.trim()) return v.trim();
+      if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 async function verifyIntervalsToken(bearerToken: string): Promise<string | null> {
-  const res = await fetch('https://intervals.icu/api/v1/athlete/self', {
-    headers: { 'Authorization': `Bearer ${bearerToken}` },
-  });
-  if (!res.ok) return null;
-  const data = await res.json() as { id: string };
-  return data.id ?? null;
+  const urls: string[] = [];
+  const jwtId = tryIntervalsJwtAthleteId(bearerToken);
+  if (jwtId) {
+    urls.push(`https://intervals.icu/api/v1/athlete/${encodeURIComponent(jwtId)}`);
+  }
+  urls.push('https://intervals.icu/api/v1/athlete/0');
+  urls.push('https://intervals.icu/api/v1/athlete/self');
+  for (const url of urls) {
+    const res = await fetch(url, {
+      headers: { 'Authorization': `Bearer ${bearerToken}` },
+    });
+    if (!res.ok) continue;
+    const data = await res.json() as { id?: string | number };
+    if (data.id == null) continue;
+    return typeof data.id === 'number' && Number.isFinite(data.id) ? String(data.id) : String(data.id).trim() || null;
+  }
+  return null;
 }
 
 interface Session {
@@ -456,6 +870,8 @@ interface Session {
   accessToken: string;
   refreshToken: string;
   expiresAt: number;
+  /** Display name from OAuth token exchange (intervals.icu returns athlete.name); used when GET /api/v1/athlete/* is forbidden. */
+  oauthAthleteName?: string;
 }
 
 async function encryptSession(session: Session, secret: string): Promise<string> {
@@ -467,7 +883,7 @@ async function encryptSession(session: Session, secret: string): Promise<string>
   combined.set(iv, 0);
   combined.set(new Uint8Array(ciphertext), iv.byteLength);
   // Use URL-safe base64 (no +, /, or = padding) to avoid cookie-encoding pitfalls
-  return btoa(String.fromCharCode(...combined))
+  return uint8ToBase64(combined)
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 }
 
@@ -498,11 +914,8 @@ async function getAesKey(secret: string): Promise<CryptoKey> {
 // ── Import ZIP ─────────────────────────────────────────────────────────────────
 
 function corsHeaders(request: Request): Record<string, string> {
-  const origin = request.headers.get('Origin') ?? '';
-  const allowOrigin =
-    origin.includes('localhost') || origin.includes('127.0.0.1') ? origin : 'https://rownative.icu';
   return {
-    'Access-Control-Allow-Origin': allowOrigin,
+    'Access-Control-Allow-Origin': corsAllowOrigin(request),
     'Access-Control-Allow-Credentials': 'true',
   };
 }
@@ -549,7 +962,10 @@ async function handleImportZip(request: Request, env: Env, athleteId: string): P
 
   const file = formData.get('file');
   if (!(file instanceof Blob)) {
-    return jsonResponse({ error: 'Missing file field' }, 400, true);
+    return jsonResponse({ error: 'Missing file field' }, 400, true, request);
+  }
+  if (file.size > MAX_ZIP_UPLOAD_BYTES) {
+    return jsonResponse({ error: 'ZIP file too large (max 10 MB)' }, 413, true, request);
   }
   const zipBytes = new Uint8Array(await file.arrayBuffer());
 
@@ -644,7 +1060,7 @@ async function fetchCourseIndex(env: Env): Promise<Array<{ id: string }>> {
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
   const res = await fetch(
-    `https://api.github.com/repos/${owner}/${repoName}/contents/courses/index.json?ref=main`,
+    `${GITHUB_API}/repos/${owner}/${repoName}/contents/courses/index.json?ref=main`,
     { headers }
   );
   if (!res.ok) return [];
@@ -676,7 +1092,7 @@ async function courseFileExistsOnMain(env: Env, id: string): Promise<boolean> {
   };
 
   const res = await fetch(
-    `https://api.github.com/repos/${owner}/${repoName}/contents/courses/${id}.json?ref=main`,
+    `${GITHUB_API}/repos/${owner}/${repoName}/contents/courses/${id}.json?ref=main`,
     { headers }
   );
   return res.ok;
@@ -700,7 +1116,7 @@ async function getCourseFileOnMain(
   };
 
   const res = await fetch(
-    `https://api.github.com/repos/${owner}/${repoName}/contents/courses/${id}.json?ref=main`,
+    `${GITHUB_API}/repos/${owner}/${repoName}/contents/courses/${id}.json?ref=main`,
     { headers }
   );
   if (!res.ok) return null;
@@ -751,7 +1167,10 @@ async function handleSubmitKml(request: Request, env: Env): Promise<Response> {
 
   const file = formData.get('file');
   if (!(file instanceof Blob)) {
-    return jsonResponse({ error: 'Missing file field' }, 400, true);
+    return jsonResponse({ error: 'Missing file field' }, 400, true, request);
+  }
+  if (file.size > MAX_KML_UPLOAD_BYTES) {
+    return jsonResponse({ error: 'KML file too large (max 1 MB)' }, 413, true, request);
   }
   const kmlText = await file.text();
   const nameOverride = formData.get('name');
@@ -816,7 +1235,10 @@ async function handleUpdateKml(request: Request, env: Env): Promise<Response> {
 
   const file = formData.get('file');
   if (!(file instanceof Blob)) {
-    return jsonResponse({ error: 'Missing KML file' }, 400, true);
+    return jsonResponse({ error: 'Missing KML file' }, 400, true, request);
+  }
+  if (file.size > MAX_KML_UPLOAD_BYTES) {
+    return jsonResponse({ error: 'KML file too large (max 1 MB)' }, 413, true, request);
   }
   const kmlText = await file.text();
   const nameOverride = formData.get('name');
@@ -1100,11 +1522,876 @@ async function handleDeleteCourseTime(timeId: string, athleteId: string, env: En
   }
 }
 
+// ── Challenges API ───────────────────────────────────────────────────────────
+
+const REMOVED_CHALLENGES_CACHE_KEY = 'removed-challenges:list';
+const REMOVED_CHALLENGES_CACHE_TTL = 300;
+const COURSE_INDEX_CACHE_KEY = 'course-index:json';
+const COURSE_INDEX_CACHE_TTL = 300;
+
+async function getRemovedChallengeIds(env: Env): Promise<Set<string>> {
+  const cached = await env.ROWING_COURSES.get(REMOVED_CHALLENGES_CACHE_KEY);
+  if (cached) {
+    try {
+      const arr = JSON.parse(cached) as unknown;
+      return new Set(Array.isArray(arr) ? arr.map(String) : []);
+    } catch {
+      // fall through
+    }
+  }
+  const res = await fetch(`${COURSES_BASE}/courses/removed-challenges.json`);
+  if (!res.ok) return new Set();
+  try {
+    const arr = (await res.json()) as unknown;
+    const ids = Array.isArray(arr) ? arr.map(String) : [];
+    await env.ROWING_COURSES.put(REMOVED_CHALLENGES_CACHE_KEY, JSON.stringify(ids), {
+      expirationTtl: REMOVED_CHALLENGES_CACHE_TTL,
+    });
+    return new Set(ids);
+  } catch {
+    return new Set();
+  }
+}
+
+async function getCourseIndex(env: Env): Promise<Array<{ id: string; name?: string }>> {
+  const cached = await env.ROWING_COURSES.get(COURSE_INDEX_CACHE_KEY);
+  if (cached) {
+    try {
+      const arr = JSON.parse(cached) as unknown;
+      return Array.isArray(arr) ? arr : [];
+    } catch {
+      // fall through
+    }
+  }
+  const res = await fetch(`${COURSES_BASE}/courses/index.json`);
+  if (!res.ok) return [];
+  try {
+    const arr = (await res.json()) as unknown;
+    const courses = Array.isArray(arr) ? arr : [];
+    await env.ROWING_COURSES.put(COURSE_INDEX_CACHE_KEY, JSON.stringify(courses), {
+      expirationTtl: COURSE_INDEX_CACHE_TTL,
+    });
+    return courses;
+  } catch {
+    return [];
+  }
+}
+
+function courseNameById(courses: Array<{ id: string; name?: string }>, id: string): string {
+  const c = courses.find((x) => String(x.id) === String(id));
+  return c?.name ?? `Course ${id}`;
+}
+
+/** Course index row (GitHub `courses/index.json`) — used for map preview and distance on challenge cards. */
+function courseIndexFields(
+  courses: Array<{ id: string; name?: string; center_lat?: number; center_lon?: number; distance_m?: number }>,
+  courseId: string,
+): { center_lat?: number; center_lon?: number; distance_m?: number } {
+  const c = courses.find((x) => String(x.id) === String(courseId));
+  if (!c) return {};
+  const out: { center_lat?: number; center_lon?: number; distance_m?: number } = {};
+  if (typeof c.center_lat === 'number') out.center_lat = c.center_lat;
+  if (typeof c.center_lon === 'number') out.center_lon = c.center_lon;
+  if (typeof c.distance_m === 'number') out.distance_m = c.distance_m;
+  return out;
+}
+
+const BUILTIN_COLLECTIONS: Record<string, string> = {
+  hocr: 'HOCR',
+  fisa: 'FISA Masters',
+  charles: 'Charles River',
+};
+
+function collectionNameById(id: string | null, custom: Map<string, string>): string | null {
+  if (!id) return null;
+  if (BUILTIN_COLLECTIONS[id]) return BUILTIN_COLLECTIONS[id];
+  return custom.get(id) ?? id;
+}
+
+function challengeToApi(row: Record<string, unknown>, courses: Array<{ id: string; name?: string; center_lat?: number; center_lon?: number; distance_m?: number }>, collectionNames: Map<string, string>): Record<string, unknown> {
+  const courseId = String(row.course_id ?? '');
+  const collectionId = row.collection_id ? String(row.collection_id) : null;
+  const courseFields = courseIndexFields(courses, courseId);
+  const rawOrgName = row.organizer_name;
+  const organizerName =
+    rawOrgName != null && String(rawOrgName).trim() !== '' ? String(rawOrgName).trim() : null;
+  return {
+    id: row.id,
+    name: row.name,
+    courseId,
+    courseName: courseNameById(courses, courseId),
+    center_lat: courseFields.center_lat,
+    center_lon: courseFields.center_lon,
+    distance_m: courseFields.distance_m,
+    rowStart: row.row_start,
+    rowEnd: row.row_end,
+    submitEnd: row.submit_end,
+    collectionId,
+    collectionName: collectionNameById(collectionId, collectionNames),
+    hasHandicap: !!collectionId,
+    organizerId: row.organizer_id,
+    organizerName,
+    resultsCount: row.results_count ?? 0,
+    isPublic: (row.is_public ?? 1) !== 0,
+    notes: row.notes ?? null,
+  };
+}
+
+function challengeDetailToApi(row: Record<string, unknown>, courses: Array<{ id: string; name?: string; center_lat?: number; center_lon?: number; distance_m?: number }>, collectionNames: Map<string, string>): Record<string, unknown> {
+  return challengeToApi(row, courses, collectionNames);
+}
+
+async function handleListChallenges(status: string, env: Env): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  const removed = await getRemovedChallengeIds(env);
+  const courses = await getCourseIndex(env);
+  try {
+    const r = await env.DB.prepare(
+      `SELECT c.*, (SELECT COUNT(*) FROM challenge_results cr WHERE cr.challenge_id = c.id AND cr.validation_status IN ('valid', 'manual_ok')) as results_count
+       FROM challenges c
+       WHERE c.is_public = 1
+       ORDER BY c.row_start DESC`
+    )
+      .all();
+    const rows = (r.results ?? []) as Record<string, unknown>[];
+    const customColls = await loadCollectionNames(env);
+    const now = new Date();
+    const filtered = rows
+      .filter((row) => !removed.has(String(row.id ?? '')))
+      .filter((row) => {
+        const rs = row.row_start ? new Date(String(row.row_start)) : now;
+        const re = row.row_end ? new Date(String(row.row_end)) : now;
+        const se = row.submit_end ? new Date(String(row.submit_end)) : now;
+        if (status === 'active') return rs <= now && now <= re && now <= se;
+        if (status === 'upcoming') return rs > now;
+        if (status === 'past') return re < now || se < now;
+        return false;
+      })
+      .map((row) => challengeToApi(row, courses, customColls));
+    return jsonResponse({ challenges: filtered }, 200, true);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ error: msg }, 500, true);
+  }
+}
+
+async function loadCollectionNames(env: Env): Promise<Map<string, string>> {
+  if (!env.DB) return new Map();
+  try {
+    const r = await env.DB.prepare('SELECT id, name FROM standard_collections').all();
+    const rows = (r.results ?? []) as Array<{ id: string; name: string }>;
+    return new Map(rows.map((x) => [x.id, x.name]));
+  } catch {
+    return new Map();
+  }
+}
+
+async function handleChallengeDetail(challengeId: string, env: Env): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  const removed = await getRemovedChallengeIds(env);
+  if (removed.has(challengeId)) return jsonResponse({ error: 'Not found' }, 404, true);
+  try {
+    const r = await env.DB.prepare(
+      'SELECT * FROM challenges WHERE id = ? AND is_public = 1'
+    )
+      .bind(challengeId)
+      .first();
+    if (!r) return jsonResponse({ error: 'Not found' }, 404, true);
+    const row = r as Record<string, unknown>;
+    const courses = await getCourseIndex(env);
+    const customColls = await loadCollectionNames(env);
+    const api = challengeDetailToApi(row, courses, customColls);
+    return jsonResponse(api, 200, true);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ error: msg }, 500, true);
+  }
+}
+
+async function handleOrganiserChallengesList(athleteId: string, env: Env): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  try {
+    const r = await env.DB.prepare(
+      `SELECT c.*, (SELECT COUNT(*) FROM challenge_results cr WHERE cr.challenge_id = c.id AND cr.validation_status IN ('valid', 'manual_ok')) as results_count
+       FROM challenges c
+       WHERE c.organizer_id = ?
+       ORDER BY c.created_at DESC`
+    )
+      .bind(athleteId)
+      .all();
+    const rows = (r.results ?? []) as Record<string, unknown>[];
+    const courses = await getCourseIndex(env);
+    const customColls = await loadCollectionNames(env);
+    const api = rows.map((row) => challengeToApi(row, courses, customColls));
+    return jsonResponse({ challenges: api }, 200, true);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ error: msg }, 500, true);
+  }
+}
+
+async function handleCreateChallenge(request: Request, athleteId: string, env: Env, ctx?: ExecutionContext): Promise<Response> {
+  try {
+    if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true, request);
+    let body: { name?: string; courseId?: string; rowStart?: string; rowEnd?: string; submitEnd?: string; collectionId?: string; notes?: string; isPublic?: boolean };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return jsonResponse({ error: 'Invalid JSON body' }, 400, true, request);
+    }
+    const name = body.name?.trim();
+    const courseId = body.courseId ? String(body.courseId) : null;
+    const rowStart = body.rowStart ? String(body.rowStart).slice(0, 19) : null;
+    const rowEnd = body.rowEnd ? String(body.rowEnd).slice(0, 19) : null;
+    const submitEnd = body.submitEnd ? String(body.submitEnd).slice(0, 19) : null;
+    if (!name || !courseId || !rowStart || !rowEnd || !submitEnd) {
+      return jsonResponse({ error: 'name, courseId, rowStart, rowEnd, submitEnd required' }, 400, true, request);
+    }
+    const rs = new Date(rowStart);
+    const re = new Date(rowEnd);
+    const se = new Date(submitEnd);
+    if (Number.isNaN(rs.getTime()) || Number.isNaN(re.getTime()) || Number.isNaN(se.getTime())) {
+      return jsonResponse({ error: 'Invalid rowStart, rowEnd, or submitEnd datetime' }, 400, true, request);
+    }
+    if (re <= rs) {
+      return jsonResponse({ error: 'rowEnd must be after rowStart' }, 400, true, request);
+    }
+    if (se < re) {
+      return jsonResponse({ error: 'submitEnd must be on or after rowEnd' }, 400, true, request);
+    }
+    const nameCheck = isNameAllowed(name);
+    if (!nameCheck.allowed) {
+      return jsonResponse({ error: nameCheck.reason ?? "That name isn't allowed." }, 400, true, request);
+    }
+    const collectionId = body.collectionId ? String(body.collectionId).trim() || null : null;
+    const notes = body.notes?.trim() || null;
+    const isPublic = body.isPublic !== false ? 1 : 0;
+    const id = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    const session = await getSessionFromRequest(request, env);
+    let organizerName: string | null = null;
+    if (session?.accessToken) {
+      const profile = await fetchIntervalsAthleteProfile(session.accessToken, athleteId);
+      organizerName =
+        profile?.name?.trim() ||
+        [profile?.first_name, profile?.last_name]
+          .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+          .map((s) => s.trim())
+          .join(' ') ||
+        session.oauthAthleteName?.trim() ||
+        null;
+    }
+    try {
+      await env.DB.prepare(
+        `INSERT INTO challenges (id, name, course_id, row_start, row_end, submit_end, collection_id, organizer_id, organizer_name, is_public, notes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+        .bind(
+          id,
+          name,
+          courseId,
+          rowStart,
+          rowEnd,
+          submitEnd,
+          collectionId,
+          athleteId,
+          organizerName,
+          isPublic,
+          notes,
+          createdAt
+        )
+        .run();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Database error';
+      return jsonResponse({ error: msg }, 500, true, request);
+    }
+    const courses = await getCourseIndex(env);
+    const customColls = await loadCollectionNames(env);
+    const challenge = challengeToApi(
+      {
+        id,
+        name,
+        course_id: courseId,
+        row_start: rowStart,
+        row_end: rowEnd,
+        submit_end: submitEnd,
+        collection_id: collectionId,
+        organizer_id: athleteId,
+        organizer_name: organizerName,
+        is_public: isPublic,
+        notes,
+        results_count: 0,
+      },
+      courses,
+      customColls
+    );
+
+    if (ctx) {
+      ctx.waitUntil(notifyAdminsNewChallenge(env, { id, name, courseId, rowStart, rowEnd, submitEnd, athleteId }));
+    }
+
+    return jsonResponse({ id, challenge }, 200, true, request);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return jsonResponse({ error: msg }, 500, true, request);
+  }
+}
+
+async function handleListStandardCollections(env: Env): Promise<Response> {
+  const builtin = [
+    { id: 'hocr', name: 'HOCR', isBuiltin: true },
+    { id: 'fisa', name: 'FISA Masters', isBuiltin: true },
+    { id: 'charles', name: 'Charles River', isBuiltin: true },
+  ];
+  if (!env.DB) return jsonResponse({ collections: builtin }, 200, true);
+  try {
+    const r = await env.DB.prepare(
+      'SELECT id, name, is_builtin FROM standard_collections ORDER BY created_at DESC'
+    )
+      .all();
+    const rows = (r.results ?? []) as Array<{ id: string; name: string; is_builtin: number }>;
+    const custom = rows.map((x) => ({
+      id: x.id,
+      name: x.name,
+      isBuiltin: x.is_builtin !== 0,
+    }));
+    return jsonResponse({ collections: [...builtin, ...custom] }, 200, true);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ collections: builtin }, 200, true);
+  }
+}
+
+function parseStandardTime(val: string): number | null {
+  const s = String(val || '').trim();
+  if (!s) return null;
+  const num = parseFloat(s);
+  if (!Number.isNaN(num) && num > 0) return num;
+  const mmss = s.match(/^(\d+):(\d{2})$/);
+  if (mmss) return parseInt(mmss[1], 10) * 60 + parseInt(mmss[2], 10);
+  return null;
+}
+
+/** Map Rowsandall CSV gender to M/F/X: Open->M, Female->F, mixed->X */
+function mapCsvSex(val: string): string {
+  const v = String(val || '').trim().toLowerCase();
+  if (v === 'female') return 'F';
+  if (v === 'mixed') return 'X';
+  if (v === 'open') return 'M';
+  return (v.slice(0, 1).toUpperCase() || 'M') as string;
+}
+
+/** Map Rowsandall CSV weight class: open-weight -> HWT, lightweight -> LWT */
+function mapCsvWeightClass(val: string): string {
+  const v = String(val || '').trim().toLowerCase();
+  if (v === 'open-weight' || v === 'openweight') return 'HWT';
+  if (v === 'lightweight' || v === 'lwt') return 'LWT';
+  return v ? v.toUpperCase().slice(0, 3) : 'HWT';
+}
+
+/** Parse age from CSV cell (integer or null) */
+function parseCsvAge(val: string): number | null {
+  const n = parseInt(String(val || '').trim(), 10);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+async function handleCreateStandardCollection(request: Request, athleteId: string, env: Env): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  const contentType = request.headers.get('Content-Type') ?? '';
+  let name = 'Custom collection';
+  let csvText: string | null = null;
+  if (contentType.includes('multipart/form-data')) {
+    try {
+      const formData = await request.formData();
+      const n = formData.get('name');
+      if (n && typeof n === 'string') name = n.trim() || name;
+      const file = formData.get('file');
+      if (file && file instanceof Blob) {
+        csvText = await file.text();
+      }
+    } catch {
+      // use default
+    }
+  } else {
+    try {
+      const body = (await request.json()) as { name?: string };
+      if (body?.name?.trim()) name = body.name.trim();
+    } catch {
+      // use default
+    }
+  }
+  const id = crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+  try {
+    await env.DB.prepare(
+      'INSERT INTO standard_collections (id, name, is_builtin, organizer_id, created_at) VALUES (?, ?, 0, ?, ?)'
+    )
+      .bind(id, name, athleteId, createdAt)
+      .run();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ error: msg }, 500, true);
+  }
+  if (csvText && csvText.trim()) {
+    const lines = csvText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const header = lines[0]?.toLowerCase() ?? '';
+    const cols = header.split(/[,\t]/).map((c) => c.trim().toLowerCase());
+    const boatIdx = cols.findIndex((c) => c.includes('boattype') || c === 'boattype' || c === 'boat_class');
+    const sexIdx = cols.findIndex((c) => c === 'sex' || c === 'gender');
+    const wcIdx = cols.findIndex((c) => c.includes('weight') || c === 'weightclass');
+    const timeIdx = cols.findIndex((c) => c.includes('coursetime') || c.includes('standard') || c === 'time');
+    const distIdx = cols.findIndex((c) => c.includes('coursedistance') || c === 'distance');
+    const ageMinIdx = cols.findIndex((c) => c === 'agemin' || c === 'ageminimum' || c === 'minimum age' || (c.includes('age') && c.includes('min')));
+    const ageMaxIdx = cols.findIndex((c) => c === 'agemax' || c === 'agemaximum' || c === 'maximum age' || (c.includes('age') && c.includes('max')));
+    for (let i = 1; i < lines.length; i++) {
+      const cells = lines[i].split(/[,\t]/).map((c) => c.trim());
+      const boatType = (boatIdx >= 0 ? cells[boatIdx] : '1x') || '1x';
+      const sexRaw = (sexIdx >= 0 ? cells[sexIdx] : 'M') || 'M';
+      const sex = mapCsvSex(sexRaw);
+      const wcRaw = (wcIdx >= 0 ? cells[wcIdx] : 'HWT') || 'HWT';
+      const weightClass = mapCsvWeightClass(wcRaw);
+      const timeS = parseStandardTime(timeIdx >= 0 ? cells[timeIdx] : '');
+      const distM = distIdx >= 0 ? parseFloat(cells[distIdx] || '') : NaN;
+      const courseDistanceM = Number.isFinite(distM) && distM > 0 ? distM : 500;
+      const ageMin = ageMinIdx >= 0 ? parseCsvAge(cells[ageMinIdx]) : -1;
+      const ageMax = ageMaxIdx >= 0 ? parseCsvAge(cells[ageMaxIdx]) : 999;
+      const ageMinVal = ageMin != null && ageMin >= 0 ? ageMin : -1;
+      const ageMaxVal = ageMax != null && ageMax >= 0 ? ageMax : 999;
+      if (timeS != null && timeS > 0) {
+        try {
+          await env.DB.prepare(
+            'INSERT OR REPLACE INTO course_standards (collection_id, boat_type, sex, weight_class, age_min, age_max, course_distance_m, standard_time_s) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+          )
+            .bind(id, boatType, sex, weightClass, ageMinVal, ageMaxVal, courseDistanceM, timeS)
+            .run();
+        } catch {
+          // skip row on error
+        }
+      }
+    }
+  }
+  return jsonResponse({ id, message: 'Created' }, 200, true);
+}
+
+async function handleOrganiserChallengeResults(challengeId: string, athleteId: string, env: Env): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  const chRow = await env.DB.prepare('SELECT organizer_id FROM challenges WHERE id = ?').bind(challengeId).first();
+  if (!chRow) return jsonResponse({ error: 'Challenge not found' }, 404, true);
+  const organizerId = (chRow as { organizer_id: string }).organizer_id;
+  if (organizerId !== athleteId) return jsonResponse({ error: 'Not your challenge' }, 403, true);
+  try {
+    const r = await env.DB.prepare(
+      `SELECT * FROM challenge_results WHERE challenge_id = ? ORDER BY raw_time_s ASC`
+    )
+      .bind(challengeId)
+      .all();
+    const rows = (r.results ?? []) as Record<string, unknown>[];
+    const results = rows.map((row, i) => {
+      const startTime = row.start_time ? String(row.start_time) : '';
+      const workoutDate = startTime ? startTime.slice(0, 10) : null;
+      return {
+        id: row.id,
+        rank: i + 1,
+        challengeId: row.challenge_id,
+        athleteId: row.athlete_id,
+        activityId: row.activity_id,
+        displayName: row.display_name ?? null,
+        rawTimeS: row.raw_time_s,
+        correctedTimeS: row.corrected_time_s ?? row.raw_time_s,
+        points: row.points ?? null,
+        boatType: row.boat_type ?? null,
+        sex: row.sex ?? null,
+        crewAvgAge: row.crew_avg_age != null ? Number(row.crew_avg_age) : null,
+        workoutDate,
+        validationStatus: row.validation_status ?? 'valid',
+        validationNote: row.validation_note ?? null,
+      };
+    });
+    return jsonResponse({ results }, 200, true);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ error: msg }, 500, true);
+  }
+}
+
+async function handleOrganiserResultOverride(request: Request, resultId: string, athleteId: string, env: Env): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  let body: { status?: string; note?: string };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return jsonResponse({ error: 'Invalid JSON body' }, 400, true);
+  }
+  const status = body.status === 'dq' ? 'dq' : 'manual_ok';
+  const note = body.note ? String(body.note).trim().slice(0, 500) : '';
+
+  const row = await env.DB.prepare(
+    `SELECT cr.id, cr.challenge_id, c.organizer_id FROM challenge_results cr
+     JOIN challenges c ON c.id = cr.challenge_id WHERE cr.id = ?`
+  )
+    .bind(resultId)
+    .first();
+  if (!row) return jsonResponse({ error: 'Result not found' }, 404, true);
+  const r = row as { organizer_id: string };
+  if (r.organizer_id !== athleteId) return jsonResponse({ error: 'Not your challenge' }, 403, true);
+
+  await env.DB.prepare(
+    'UPDATE challenge_results SET validation_status = ?, validation_note = ? WHERE id = ?'
+  )
+    .bind(status, note, resultId)
+    .run();
+  return jsonResponse({ updated: true }, 200, true);
+}
+
+async function handleOrganiserResultTrack(
+  resultId: string,
+  athleteId: string,
+  env: Env
+): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  const row = await env.DB.prepare(
+    `SELECT cr.track_latlng, c.organizer_id FROM challenge_results cr
+     JOIN challenges c ON c.id = cr.challenge_id WHERE cr.id = ?`
+  )
+    .bind(resultId)
+    .first();
+  if (!row) return jsonResponse({ error: 'Result not found' }, 404, true);
+  const r = row as { track_latlng: string | null; organizer_id: string };
+  if (r.organizer_id !== athleteId) return jsonResponse({ error: 'Not your challenge' }, 403, true);
+
+  let latlng: [number, number][];
+  try {
+    latlng = r.track_latlng ? (JSON.parse(r.track_latlng) as [number, number][]) : [];
+  } catch {
+    latlng = [];
+  }
+  if (!Array.isArray(latlng) || latlng.length < 2) return jsonResponse({ error: 'No GPS track stored' }, 400, true);
+
+  return jsonResponse({ latlng }, 200, true);
+}
+
+async function handleChallengeResults(challengeId: string, env: Env): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  const removed = await getRemovedChallengeIds(env);
+  if (removed.has(challengeId)) return jsonResponse({ error: 'Not found' }, 404, true);
+  const chRow = await env.DB.prepare('SELECT collection_id FROM challenges WHERE id = ?').bind(challengeId).first();
+  const hasHandicap = chRow && (chRow as { collection_id: string | null }).collection_id != null;
+  const orderCol = hasHandicap ? 'corrected_time_s' : 'raw_time_s';
+  try {
+    const r = await env.DB.prepare(
+      `SELECT * FROM challenge_results
+       WHERE challenge_id = ? AND validation_status IN ('valid', 'manual_ok')
+       ORDER BY ${orderCol} ASC`
+    )
+      .bind(challengeId)
+      .all();
+    const rows = (r.results ?? []) as Record<string, unknown>[];
+    const results = rows.map((row, i) => {
+      const startTime = row.start_time ? String(row.start_time) : '';
+      const workoutDate = startTime ? startTime.slice(0, 10) : null;
+      return {
+        id: row.id,
+        rank: i + 1,
+        challengeId: row.challenge_id,
+        athleteId: row.athlete_id,
+        activityId: row.activity_id,
+        displayName: row.display_name ?? null,
+        rawTimeS: row.raw_time_s,
+        correctedTimeS: row.corrected_time_s ?? row.raw_time_s,
+        points: row.points ?? null,
+        boatType: row.boat_type ?? null,
+        sex: row.sex ?? null,
+        crewAvgAge: row.crew_avg_age != null ? Number(row.crew_avg_age) : null,
+        workoutDate,
+        validationStatus: row.validation_status ?? 'valid',
+      };
+    });
+    return jsonResponse({ results }, 200, true);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ error: msg }, 500, true);
+  }
+}
+
+async function handleChallengeSubmit(
+  request: Request,
+  challengeId: string,
+  athleteId: string,
+  env: Env
+): Promise<Response> {
+  const submitUrl = new URL(request.url);
+  const debugSubmit = submitUrl.searchParams.get('debug') === '1';
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  const removed = await getRemovedChallengeIds(env);
+  if (removed.has(challengeId)) return jsonResponse({ error: 'Not found' }, 404, true);
+
+  let body: { activityId?: string; displayName?: string; boatType?: string; sex?: string; weightClass?: string; crewAvgAge?: number };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return jsonResponse({ error: 'Invalid JSON body' }, 400, true);
+  }
+  const activityId = body.activityId ? String(body.activityId).trim() : null;
+  if (!activityId) return jsonResponse({ error: 'activityId required' }, 400, true);
+
+  const session = await getSessionFromRequest(request, env);
+  if (!session) return jsonResponse({ error: 'Unauthorised' }, 401, true);
+
+  // Load challenge
+  const chRow = await env.DB.prepare(
+    'SELECT * FROM challenges WHERE id = ? AND is_public = 1'
+  )
+    .bind(challengeId)
+    .first();
+  if (!chRow) return jsonResponse({ error: 'Challenge not found' }, 404, true);
+  const ch = chRow as Record<string, unknown>;
+  const courseId = String(ch.course_id ?? '');
+  const rowStart = ch.row_start ? String(ch.row_start).slice(0, 10) : '';
+  const rowEnd = ch.row_end ? String(ch.row_end).slice(0, 10) : '';
+  const submitEnd = ch.submit_end ? String(ch.submit_end) : '';
+
+  const now = new Date();
+  if (submitEnd && new Date(submitEnd) < now) {
+    return jsonResponse({ error: 'Submissions closed' }, 400, true);
+  }
+
+  // Fetch activity for workout start date
+  const activity = await fetchIntervalsActivity(activityId, session.accessToken);
+  if (!activity) return jsonResponse({ error: 'Activity not found' }, 404, true);
+  const startDateLocal = activity.start_date_local ? String(activity.start_date_local).slice(0, 10) : null;
+  if (!startDateLocal) {
+    return jsonResponse({ error: 'Activity has no start date' }, 400, true);
+  }
+  if (startDateLocal < rowStart || startDateLocal > rowEnd) {
+    return jsonResponse({
+      error: `Workout date ${startDateLocal} is outside the row window (${rowStart} – ${rowEnd})`,
+    }, 400, true);
+  }
+
+  // Fetch course JSON
+  const courseRes = await fetch(`${COURSES_BASE}/courses/${courseId}.json`);
+  if (!courseRes.ok) return jsonResponse({ error: 'Course not found' }, 404, true);
+  const course = (await courseRes.json()) as { id: string; polygons: unknown[]; distance_m?: number };
+  if (!course.polygons || course.polygons.length < 2) {
+    return jsonResponse({ error: 'Invalid course' }, 400, true);
+  }
+
+  // Fetch streams and run calculateCourseTime
+  let streams: { latlng?: [number, number][]; time?: number[] };
+  try {
+    streams = await fetchIntervalsStreams(activityId, session.accessToken);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Failed to fetch activity streams';
+    return jsonResponse({ error: msg }, 502, true);
+  }
+  const latlng = streams.latlng;
+  const time = streams.time;
+  if (!latlng || !time || latlng.length < 2 || time.length < 2) {
+    return jsonResponse({ error: 'Activity has no GPS track' }, 400, true);
+  }
+  const len = Math.min(latlng.length, time.length);
+  const track: TrackPoint[] = [];
+  for (let i = 0; i < len; i++) {
+    const [lat, lon] = latlng[i];
+    track.push({ lat, lon, time: time[i] });
+  }
+
+  const validationLog: string[] = [];
+  const result = calculateCourseTime(
+    course as { id: string; polygons: Array<{ name: string; order: number; points: Array<{ lat: number; lon: number }> }>; distance_m?: number },
+    track,
+    haversine,
+    { log: validationLog }
+  );
+
+  if (!result.valid) {
+    return jsonResponse({
+      error: 'Validation failed',
+      validationNote: result.validationNote,
+    }, 400, true);
+  }
+
+  let intervalsMeta: IntervalsAthleteSelfMeta | undefined;
+  let displayName: string | null = body.displayName?.trim() || null;
+  if (!displayName) {
+    const { profile, meta } = await fetchIntervalsAthleteProfileWithMeta(session.accessToken, athleteId);
+    intervalsMeta = meta;
+    if (profile) {
+      const fromParts = [profile.first_name, profile.last_name]
+        .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+        .map((s) => s.trim())
+        .join(' ');
+      displayName = profile.name?.trim() || fromParts || null;
+    }
+    if (!displayName && session.oauthAthleteName?.trim()) {
+      displayName = session.oauthAthleteName.trim();
+    }
+  } else if (debugSubmit) {
+    const { meta } = await fetchIntervalsAthleteProfileWithMeta(session.accessToken, athleteId);
+    intervalsMeta = meta;
+  }
+  if (displayName) {
+    const displayCheck = isNameAllowed(displayName);
+    if (!displayCheck.allowed) {
+      return jsonResponse({
+        error: displayCheck.reason ?? "That name isn't allowed.",
+        ...(debugSubmit ? {
+          _debug: {
+            intervalsAthleteSelf: intervalsMeta,
+            displayNameRejected: displayName,
+          },
+        } : {}),
+      }, 400, true);
+    }
+  }
+  const boatType = body.boatType ? String(body.boatType).trim() || null : null;
+  const sex = body.sex ? String(body.sex).trim() || null : null;
+  const weightClass = body.weightClass ? String(body.weightClass).trim() || null : null;
+
+  let crewAvgAge: number | null = null;
+  if (body.crewAvgAge != null) {
+    const n = Number(body.crewAvgAge);
+    if (!Number.isInteger(n) || n < 8 || n > 120) {
+      return jsonResponse({ error: 'crewAvgAge must be an integer between 8 and 120' }, 400, true);
+    }
+    crewAvgAge = n;
+  }
+
+  const collectionId = ch.collection_id ? String(ch.collection_id) : null;
+  const hasHandicap = !!collectionId;
+  if (hasHandicap && (!boatType || !sex)) {
+    return jsonResponse({ error: 'boatType and sex required for handicap challenges' }, 400, true);
+  }
+  let categoryKey = hasHandicap
+    ? (boatType || '') + '|' + (sex || '') + '|' + (weightClass || '')
+    : 'raw';
+  let correctedTimeS = result.timeS;
+  let points: number | null = null;
+  if (collectionId && boatType && sex) {
+    const builtin = ['hocr', 'fisa', 'charles'];
+    if (!builtin.includes(collectionId.toLowerCase()) && env.DB) {
+      const ageAgnostic = await env.DB.prepare(
+        'SELECT 1 FROM course_standards WHERE collection_id = ? AND age_min = -1 AND age_max = 999 LIMIT 1'
+      )
+        .bind(collectionId)
+        .first();
+      if (!ageAgnostic && crewAvgAge == null) {
+        return jsonResponse({ error: 'crewAvgAge required for this handicap collection' }, 400, true);
+      }
+    }
+    const courseDistanceM = (typeof course.distance_m === 'number' && course.distance_m > 0 ? course.distance_m : result.distanceM) || undefined;
+    const handicap = await computeHandicap(
+      collectionId,
+      { rawTimeS: result.timeS, boatType, sex, weightClass: weightClass ?? undefined, courseDistanceM, crewAvgAge: crewAvgAge ?? undefined },
+      env.DB
+    );
+    if (handicap) {
+      correctedTimeS = handicap.correctedTimeS;
+      points = handicap.points;
+      if (handicap.ageBand) {
+        categoryKey = (boatType || '') + '|' + (sex || '') + '|' + (weightClass || '') + '|' + handicap.ageBand;
+      }
+    }
+  }
+
+  const validationNote = result.validationNote || '';
+
+  const maxPoints = 600;
+  const step = latlng.length <= maxPoints ? 1 : Math.ceil(latlng.length / maxPoints);
+  const trackLatlng = JSON.stringify(latlng.filter((_, i) => i % step === 0));
+
+  const id = crypto.randomUUID();
+  const submittedAt = new Date().toISOString();
+  const startTime = activity.start_date_local ? String(activity.start_date_local) : submittedAt;
+  let resultId = id;
+  let replaced = false;
+
+  try {
+    const existingForCategory = await env.DB.prepare(
+      'SELECT id FROM challenge_results WHERE challenge_id = ? AND athlete_id = ? AND category_key = ?'
+    )
+      .bind(challengeId, athleteId, categoryKey)
+      .first();
+    replaced = !!existingForCategory;
+
+    await env.DB.prepare(
+      `INSERT INTO challenge_results (id, challenge_id, athlete_id, activity_id, display_name, raw_time_s, corrected_time_s, points, boat_type, sex, weight_class, crew_avg_age, start_time, validation_status, validation_note, track_latlng, submitted_at, category_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'valid', ?, ?, ?, ?)
+       ON CONFLICT(challenge_id, athlete_id, category_key) DO UPDATE SET
+         activity_id = excluded.activity_id,
+         display_name = excluded.display_name,
+         raw_time_s = excluded.raw_time_s,
+         corrected_time_s = excluded.corrected_time_s,
+         points = excluded.points,
+         boat_type = excluded.boat_type,
+         sex = excluded.sex,
+         weight_class = excluded.weight_class,
+         crew_avg_age = excluded.crew_avg_age,
+         start_time = excluded.start_time,
+         validation_status = 'valid',
+         validation_note = excluded.validation_note,
+         track_latlng = excluded.track_latlng,
+         submitted_at = excluded.submitted_at`
+    )
+      .bind(id, challengeId, athleteId, activityId, displayName, result.timeS, correctedTimeS, points, boatType, sex, weightClass, crewAvgAge, startTime, validationNote, trackLatlng, submittedAt, categoryKey)
+      .run();
+    const existing = await env.DB.prepare(
+      'SELECT id FROM challenge_results WHERE challenge_id = ? AND athlete_id = ? AND category_key = ?'
+    )
+      .bind(challengeId, athleteId, categoryKey)
+      .first();
+    resultId = (existing as { id: string } | null)?.id ?? id;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error';
+    return jsonResponse({ error: msg }, 500, true);
+  }
+
+  let rank: number;
+  if (points != null) {
+    const countResult = await env.DB.prepare(
+      `SELECT COUNT(*) as cnt FROM challenge_results
+       WHERE challenge_id = ? AND validation_status IN ('valid', 'manual_ok') AND corrected_time_s <= ?`
+    )
+      .bind(challengeId, correctedTimeS)
+      .first();
+    rank = (countResult as { cnt: number })?.cnt ?? 1;
+  } else {
+    const countResult = await env.DB.prepare(
+      `SELECT COUNT(*) as cnt FROM challenge_results
+       WHERE challenge_id = ? AND validation_status IN ('valid', 'manual_ok') AND raw_time_s <= ?`
+    )
+      .bind(challengeId, result.timeS)
+      .first();
+    rank = (countResult as { cnt: number })?.cnt ?? 1;
+  }
+
+  return jsonResponse({
+    success: true,
+    resultId,
+    rank,
+    rawTimeS: result.timeS,
+    correctedTimeS,
+    points,
+    validationNote,
+    replaced,
+    ...(debugSubmit ? {
+      _debug: {
+        displayNameStored: displayName,
+        displayNameFromBody: body.displayName?.trim() || null,
+        intervalsAthleteSelf: intervalsMeta,
+        athleteId,
+        challengeId,
+        categoryKey,
+      },
+    } : {}),
+  }, 200, true);
+}
+
 type OpenCoursePRResult = { ok: true; prUrl: string } | { ok: false; error: string };
 
 async function openCoursePR(
   env: Env,
-  courseJson: { id: string; [k: string]: unknown },
+  courseJson: CourseFromKml,
   kmlContent: string,
   source: 'rowsandall' | 'web' = 'rowsandall'
 ): Promise<OpenCoursePRResult> {
@@ -1134,39 +2421,27 @@ async function openCoursePR(
     'User-Agent': 'rownative-worker',
   };
 
-  async function ghError(res: Response): Promise<string> {
-    const text = await res.text();
-    let msg: string;
-    try {
-      const j = JSON.parse(text) as { message?: string };
-      msg = j.message ?? text;
-    } catch {
-      msg = text || res.statusText;
-    }
-    return `GitHub API (${res.status}): ${msg}`;
-  }
-
-  const mainRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/git/ref/heads/main`, {
+  const mainRes = await fetch(`${GITHUB_API}/repos/${owner}/${repoName}/git/ref/heads/main`, {
     headers,
   });
-  if (!mainRes.ok) return { ok: false, error: await ghError(mainRes) };
+  if (!mainRes.ok) return { ok: false, error: await githubApiError(mainRes) };
 
   const mainRef = (await mainRes.json()) as { object: { sha: string } };
   const mainSha = mainRef.object.sha;
 
-  const createBranchRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/git/refs`, {
+  const createBranchRes = await fetch(`${GITHUB_API}/repos/${owner}/${repoName}/git/refs`, {
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({ ref: `refs/heads/${branchName}`, sha: mainSha }),
   });
-  if (!createBranchRes.ok) return { ok: false, error: await ghError(createBranchRes) };
+  if (!createBranchRes.ok) return { ok: false, error: await githubApiError(createBranchRes) };
 
   const courseJsonStr = JSON.stringify(courseJson, null, 2);
-  const courseB64 = btoa(String.fromCharCode(...new TextEncoder().encode(courseJsonStr)));
-  const kmlB64 = btoa(String.fromCharCode(...new TextEncoder().encode(kmlContent)));
+  const courseB64 = uint8ToBase64(new TextEncoder().encode(courseJsonStr));
+  const kmlB64 = uint8ToBase64(new TextEncoder().encode(kmlContent));
 
   const putJson = await fetch(
-    `https://api.github.com/repos/${owner}/${repoName}/contents/courses/${id}.json`,
+    `${GITHUB_API}/repos/${owner}/${repoName}/contents/courses/${id}.json`,
     {
       method: 'PUT',
       headers: { ...headers, 'Content-Type': 'application/json' },
@@ -1177,10 +2452,10 @@ async function openCoursePR(
       }),
     }
   );
-  if (!putJson.ok) return { ok: false, error: await ghError(putJson) };
+  if (!putJson.ok) return { ok: false, error: await githubApiError(putJson) };
 
   const putKml = await fetch(
-    `https://api.github.com/repos/${owner}/${repoName}/contents/kml/${id}.kml`,
+    `${GITHUB_API}/repos/${owner}/${repoName}/contents/kml/${id}.kml`,
     {
       method: 'PUT',
       headers: { ...headers, 'Content-Type': 'application/json' },
@@ -1191,9 +2466,9 @@ async function openCoursePR(
       }),
     }
   );
-  if (!putKml.ok) return { ok: false, error: await ghError(putKml) };
+  if (!putKml.ok) return { ok: false, error: await githubApiError(putKml) };
 
-  const prRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/pulls`, {
+  const prRes = await fetch(`${GITHUB_API}/repos/${owner}/${repoName}/pulls`, {
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -1203,7 +2478,7 @@ async function openCoursePR(
       body,
     }),
   });
-  if (!prRes.ok) return { ok: false, error: await ghError(prRes) };
+  if (!prRes.ok) return { ok: false, error: await githubApiError(prRes) };
   const pr = (await prRes.json()) as { html_url?: string };
   const prUrl = pr.html_url ?? null;
   return prUrl ? { ok: true, prUrl } : { ok: false, error: 'GitHub did not return PR URL' };
@@ -1233,38 +2508,26 @@ async function openCourseUpdatePR(
     'User-Agent': 'rownative-worker',
   };
 
-  async function ghError(res: Response): Promise<string> {
-    const text = await res.text();
-    let msg: string;
-    try {
-      const j = JSON.parse(text) as { message?: string };
-      msg = j.message ?? text;
-    } catch {
-      msg = text || res.statusText;
-    }
-    return `GitHub API (${res.status}): ${msg}`;
-  }
-
-  const mainRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/git/ref/heads/main`, {
+  const mainRes = await fetch(`${GITHUB_API}/repos/${owner}/${repoName}/git/ref/heads/main`, {
     headers,
   });
-  if (!mainRes.ok) return { ok: false, error: await ghError(mainRes) };
+  if (!mainRes.ok) return { ok: false, error: await githubApiError(mainRes) };
 
   const mainRef = (await mainRes.json()) as { object: { sha: string } };
   const mainSha = mainRef.object.sha;
 
-  const createBranchRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/git/refs`, {
+  const createBranchRes = await fetch(`${GITHUB_API}/repos/${owner}/${repoName}/git/refs`, {
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({ ref: `refs/heads/${branchName}`, sha: mainSha }),
   });
-  if (!createBranchRes.ok) return { ok: false, error: await ghError(createBranchRes) };
+  if (!createBranchRes.ok) return { ok: false, error: await githubApiError(createBranchRes) };
 
   const courseJsonStr = JSON.stringify(courseJson, null, 2);
-  const courseB64 = btoa(String.fromCharCode(...new TextEncoder().encode(courseJsonStr)));
+  const courseB64 = uint8ToBase64(new TextEncoder().encode(courseJsonStr));
 
   const putJson = await fetch(
-    `https://api.github.com/repos/${owner}/${repoName}/contents/courses/${id}.json`,
+    `${GITHUB_API}/repos/${owner}/${repoName}/contents/courses/${id}.json`,
     {
       method: 'PUT',
       headers: { ...headers, 'Content-Type': 'application/json' },
@@ -1276,9 +2539,9 @@ async function openCourseUpdatePR(
       }),
     }
   );
-  if (!putJson.ok) return { ok: false, error: await ghError(putJson) };
+  if (!putJson.ok) return { ok: false, error: await githubApiError(putJson) };
 
-  const prRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/pulls`, {
+  const prRes = await fetch(`${GITHUB_API}/repos/${owner}/${repoName}/pulls`, {
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -1288,7 +2551,7 @@ async function openCourseUpdatePR(
       body: `Revised geometry via rownative.icu. Course: ${courseName}`,
     }),
   });
-  if (!prRes.ok) return { ok: false, error: await ghError(prRes) };
+  if (!prRes.ok) return { ok: false, error: await githubApiError(prRes) };
   const pr = (await prRes.json()) as { html_url?: string };
   const prUrl = pr.html_url ?? null;
   return prUrl ? { ok: true, prUrl } : { ok: false, error: 'GitHub did not return PR URL' };

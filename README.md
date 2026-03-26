@@ -12,10 +12,10 @@ The worker runs on Cloudflare and handles all `/api/*` and `/oauth/*` routes for
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
-| `/api/courses` | GET | — | Course index JSON. Optional geo filter: `?lat=&lon=&radius=` (all in meters; filters by haversine distance from center) |
+| `/api/courses` | GET | — | Course index. Returns `{ courses }`. Optional geo filter: `?lat=&lon=&radius=` (all in meters; filters by haversine distance from center) |
 | `/api/courses/kml` | GET | — | KML bundle for course IDs. Query: `?ids=1,2,3` (required) |
 | `/api/courses/{id}` | GET | — | Single course KML. Optional: `?cn=true` for Chinese KML variant |
-| `/api/me` | GET | — | Current user: `{ athleteId, liked }` or `{ athleteId: null, liked: [] }` |
+| `/api/me` | GET | — | Current user: `{ athleteId, liked, isOrganizer, athleteDisplayName? }` or `{ athleteId: null, liked: [], isOrganizer: false }`. `athleteDisplayName` from intervals.icu profile (for challenge submission pre-fill). |
 
 ### Authenticated endpoints (cookie or API key)
 
@@ -33,6 +33,24 @@ The worker runs on Cloudflare and handles all `/api/*` and `/oauth/*` routes for
 | `/api/courses/{id}/course-times` | POST | Cookie | Save course time. Body: `{ activityId, timeS, distanceM, validationNote?, workoutDate? }` (workoutDate: YYYY-MM-DD of the workout) |
 | `/api/me/course-times` | GET | Cookie | List saved course times (returns `{ courseTimes }` with `id`, `activity_id`, `course_id`, `time_s`, `distance_m`, `workout_date`, `created_at`, etc.) |
 | `/api/me/course-times/{id}` | DELETE | Cookie | Remove a saved course time by id |
+
+### Challenges (public)
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/api/challenges` | GET | — | List challenges. Query: `?status=active\|upcoming\|past` (default: active). Returns `{ challenges }` |
+| `/api/challenges/{id}` | GET | — | Challenge detail |
+| `/api/challenges/{id}/results` | GET | — | Leaderboard results (valid/manual_ok only). Returns `{ results }` |
+| `/api/challenges/{id}/submit` | POST | Cookie | Submit result. Body: `{ activityId, displayName?, boatType?, sex? }`. GPS validation via calculateCourseTime; workout date must be within row window |
+
+### Organiser (auth + isOrganizer required)
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/api/organiser/challenges` | GET | Cookie | My challenges. Returns `{ challenges }` |
+| `/api/organiser/challenges` | POST | Cookie | Create challenge. Body: `{ name, courseId, rowStart, rowEnd, submitEnd, collectionId?, notes?, isPublic? }` |
+| `/api/organiser/standard-collections` | GET | Cookie | List standard collections (built-in + custom). Returns `{ collections }` |
+| `/api/organiser/standard-collections` | POST | Cookie | Create custom collection. Body: JSON `{ name }` or multipart `name` (+ optional `file`) |
 
 ### Authentication methods
 
@@ -85,7 +103,7 @@ Create a KV namespace and add it to `wrangler.jsonc`:
 ]
 ```
 
-The worker uses KV for: liked courses per athlete, OAuth state (fallback when cookies don't persist), and session-related data.
+The worker uses KV for: liked courses per athlete, OAuth state (fallback when cookies don't persist), organisers list (cached from `courses/organisers.json` on GitHub), and session-related data.
 
 ### 3. D1 database (Phase 2a — course times)
 
@@ -96,7 +114,7 @@ npx wrangler d1 create rowing-courses-db
 npx wrangler d1 migrations apply rowing-courses-db --remote
 ```
 
-Local development uses an ephemeral D1 instance; migrations run automatically.
+For local dev, run `npx wrangler d1 migrations apply rowing-courses-db --local` before `npm run dev` (or let `npm run dev` do it automatically).
 
 ### 4. Secrets
 
@@ -111,6 +129,8 @@ Set these via `wrangler secret put <NAME>`:
 
 `GITHUB_REPO` is an optional environment variable (default: `rownative/courses`).
 
+See [docs/DEPLOY.md](docs/DEPLOY.md) for full deployment instructions.
+
 ## Development
 
 ```bash
@@ -121,6 +141,21 @@ npm run deploy  # deploy to Cloudflare Workers
 ```
 
 Local dev uses Miniflare with the same wrangler config. Ensure `wrangler.jsonc` includes a KV namespace binding for tests (or use a separate dev namespace).
+
+### OAuth and secrets locally (`client_id=undefined`)
+
+`wrangler secret put` applies to **deployed** Workers only. For **`npm run dev`**, Wrangler reads **[`.dev.vars`](https://developers.cloudflare.com/workers/wrangler/configuration/#secrets)** (gitignored).
+
+1. Copy `.dev.vars.example` to `.dev.vars`.
+2. Set `INTERVALS_CLIENT_ID`, `INTERVALS_CLIENT_SECRET`, and `TOKEN_ENCRYPTION_KEY` (same values you use in production secrets, or a dev OAuth app).
+3. In your intervals.icu app settings, add redirect URI **`http://localhost:8787/oauth/callback`** (in addition to production if needed).
+4. Restart `npm run dev`.
+
+If `INTERVALS_CLIENT_ID` is missing, the authorize URL sent to intervals.icu will contain `client_id=undefined` and their server will error.
+
+### Frontend against local Worker
+
+From the **courses** repo, run `npm run dev` for the static site, then open the URL documented in [courses `CONTRIBUTING.md` — Local development with real Worker](https://github.com/rownative/courses/blob/main/CONTRIBUTING.md) (`?debug=1&api=http://localhost:8787/api`).
 
 ## Contributing
 

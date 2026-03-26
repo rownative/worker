@@ -30,7 +30,7 @@ describe('Rowing Courses Worker', () => {
 		expect(response.status).toBe(200);
 		expect(response.headers.get('Content-Type')).toContain('application/json');
 		const data = await response.json();
-		expect(data).toEqual({ athleteId: null, liked: [] });
+		expect(data).toEqual({ athleteId: null, liked: [], isOrganizer: false, athleteDisplayName: null });
 	});
 
 	it('GET /api/courses/kml without ids returns 400', async () => {
@@ -59,11 +59,13 @@ describe('Rowing Courses Worker', () => {
 			expect(response.status).toBe(200);
 			expect(response.headers.get('Content-Type')).toContain('application/json');
 			const data = await response.json();
-			expect(Array.isArray(data)).toBe(true);
-			expect(data.length).toBeGreaterThan(0);
-			expect(data[0]).toHaveProperty('id');
-			expect(data[0]).toHaveProperty('center_lat');
-			expect(data[0]).toHaveProperty('center_lon');
+			expect(data).toHaveProperty('courses');
+			const courses = data.courses;
+			expect(Array.isArray(courses)).toBe(true);
+			expect(courses.length).toBeGreaterThan(0);
+			expect(courses[0]).toHaveProperty('id');
+			expect(courses[0]).toHaveProperty('center_lat');
+			expect(courses[0]).toHaveProperty('center_lon');
 		});
 
 		it('returns filtered courses when lat, lon, radius provided', async () => {
@@ -73,7 +75,9 @@ describe('Rowing Courses Worker', () => {
 			expect(response.status).toBe(200);
 			expect(response.headers.get('Content-Type')).toContain('application/json');
 			const data = await response.json();
-			expect(Array.isArray(data)).toBe(true);
+			expect(data).toHaveProperty('courses');
+			const courses = data.courses;
+			expect(Array.isArray(courses)).toBe(true);
 			// All returned courses should be within 50 km of (42, -71)
 			const haversine = (a: { lat: number; lon: number }, b: { lat: number; lon: number }) => {
 				const R = 6371000;
@@ -86,7 +90,7 @@ describe('Rowing Courses Worker', () => {
 				return 2 * R * Math.asin(Math.sqrt(x));
 			};
 			const center = { lat: 42, lon: -71 };
-			for (const c of data) {
+			for (const c of courses) {
 				if (c.center_lat != null && c.center_lon != null) {
 					expect(haversine(center, { lat: c.center_lat, lon: c.center_lon })).toBeLessThanOrEqual(50000);
 				}
@@ -102,6 +106,7 @@ describe('Rowing Courses Worker', () => {
 			expect(location).toContain('https://intervals.icu/oauth/authorize');
 			expect(location).toContain('state=');
 			expect(location).toContain('response_type=code');
+			expect(location).toContain('SETTINGS%3AREAD');
 			const setCookie = response.headers.get('Set-Cookie') ?? '';
 			expect(setCookie).toContain('rn_oauth_state=');
 			expect(setCookie).toContain('HttpOnly');
@@ -182,9 +187,52 @@ describe('Rowing Courses Worker', () => {
 			expect(setCookie).toContain('rn_session=');
 			expect(setCookie).toContain('Max-Age=0');
 		});
+
+		it('GET /oauth/logout with local=1 rejects external return_to (open redirect)', async () => {
+			const response = await fetchAndWait(
+				'https://rownative.icu/oauth/logout?local=1&return_to=https://evil.com/steal',
+			);
+			expect(response.status).toBe(302);
+			expect(response.headers.get('Location')).toBe('http://localhost:8080/');
+		});
+
+		it('GET /oauth/logout with local=1 accepts safe return_to to localhost', async () => {
+			const response = await fetchAndWait(
+				'https://rownative.icu/oauth/logout?local=1&return_to=http://localhost:3000/app',
+			);
+			expect(response.status).toBe(302);
+			expect(response.headers.get('Location')).toBe('http://localhost:3000/app');
+		});
 	});
 
-	describe('Phase 2a — Course times', () => {
+	describe('CORS origin validation', () => {
+		it('GET /api/me does not reflect Origin http://evil-localhost.com', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/me', {
+				headers: { Origin: 'http://evil-localhost.com' },
+			});
+			expect(response.status).toBe(200);
+			expect(response.headers.get('Access-Control-Allow-Origin')).toBe('https://rownative.icu');
+		});
+
+		it('GET /api/me reflects legitimate localhost Origin', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/me', {
+				headers: { Origin: 'http://localhost:8080' },
+			});
+			expect(response.status).toBe(200);
+			expect(response.headers.get('Access-Control-Allow-Origin')).toBe('http://localhost:8080');
+		});
+
+		it('OPTIONS preflight does not reflect Origin http://evil-localhost.com', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/me', {
+				method: 'OPTIONS',
+				headers: { Origin: 'http://evil-localhost.com' },
+			});
+			expect(response.status).toBe(204);
+			expect(response.headers.get('Access-Control-Allow-Origin')).toBe('https://rownative.icu');
+		});
+	});
+
+	describe('Phase 2a - Course times', () => {
 		it('GET /api/me/activities returns 401 when not authenticated', async () => {
 			const response = await fetchAndWait('https://rownative.icu/api/me/activities');
 			expect(response.status).toBe(401);
@@ -201,6 +249,118 @@ describe('Rowing Courses Worker', () => {
 
 		it('GET /api/me/course-times returns 401 when not authenticated', async () => {
 			const response = await fetchAndWait('https://rownative.icu/api/me/course-times');
+			expect(response.status).toBe(401);
+		});
+	});
+
+	describe('Challenges and organiser', () => {
+		/** Local Vitest D1 may lack migrations; then handlers return 500 with { error }. */
+		async function challengesListResponse(url: string) {
+			const response = await fetchAndWait(url);
+			const data = (await response.json()) as { challenges?: unknown[]; error?: string };
+			return { response, data };
+		}
+
+		it('GET /api/challenges returns challenges list or database error JSON', async () => {
+			const { response, data } = await challengesListResponse('https://rownative.icu/api/challenges');
+			if (response.status === 200) {
+				expect(data.challenges).toBeDefined();
+				expect(Array.isArray(data.challenges)).toBe(true);
+			} else {
+				expect(response.status).toBe(500);
+				expect(data.error).toBeTruthy();
+			}
+		});
+
+		it('GET /api/challenges?status=active uses active filter when DB is available', async () => {
+			const { response, data } = await challengesListResponse(
+				'https://rownative.icu/api/challenges?status=active',
+			);
+			if (response.status === 200) {
+				expect(data.challenges).toBeDefined();
+			} else {
+				expect(response.status).toBe(500);
+				expect(data.error).toBeTruthy();
+			}
+		});
+
+		it('GET /api/challenges?status=invalid defaults status to active', async () => {
+			const { response, data } = await challengesListResponse(
+				'https://rownative.icu/api/challenges?status=not-a-status',
+			);
+			if (response.status === 200) {
+				expect(data.challenges).toBeDefined();
+			} else {
+				expect(response.status).toBe(500);
+				expect(data.error).toBeTruthy();
+			}
+		});
+
+		it('GET /api/challenges/unknown-id returns 404 when DB works, else 500', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/challenges/nonexistent-challenge-id-xyz');
+			const data = (await response.json()) as { error?: string };
+			expect([404, 500]).toContain(response.status);
+			expect(data.error).toBeTruthy();
+		});
+
+		it('POST /api/challenges/x/submit returns 401 when not authenticated', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/challenges/c1/submit', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({}),
+			});
+			expect(response.status).toBe(401);
+		});
+
+		it('GET /api/organiser/challenges returns 401 when not authenticated', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/organiser/challenges');
+			expect(response.status).toBe(401);
+		});
+
+		it('POST /api/organiser/challenges returns 401 when not authenticated', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/organiser/challenges', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({}),
+			});
+			expect(response.status).toBe(401);
+		});
+
+		it('GET /api/organiser/standard-collections returns 401 when not authenticated', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/organiser/standard-collections');
+			expect(response.status).toBe(401);
+		});
+
+		it('POST /api/organiser/standard-collections returns 401 when not authenticated', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/organiser/standard-collections', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({}),
+			});
+			expect(response.status).toBe(401);
+		});
+	});
+
+	describe('Auth, KML liked, follow', () => {
+		it('POST /api/auth/crewnerd without Bearer returns 401', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/auth/crewnerd', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({}),
+			});
+			expect(response.status).toBe(401);
+			expect(await response.text()).toBe('Missing bearer token');
+		});
+
+		it('GET /api/courses/kml/liked returns 401 when not authenticated', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/courses/kml/liked');
+			expect(response.status).toBe(401);
+		});
+
+		it('POST /api/rowers/courses/1/follow returns 401 when not authenticated', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/rowers/courses/1/follow', {
+				method: 'POST',
+			});
 			expect(response.status).toBe(401);
 		});
 	});

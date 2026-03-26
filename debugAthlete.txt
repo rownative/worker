@@ -1,0 +1,32 @@
+debug=1 — challenge API traces (Worker: _debug.intervalsAthleteSelf shows intervals.icu GET /athlete/self). serve_dev mock does not call intervals.
+
+[2026-03-26T17:23:58.791Z] GET http://localhost:8787/api/me?debug=1
+{
+  "athleteId": "i58453",
+  "liked": [
+    "150",
+    "170"
+  ],
+  "isOrganizer": true,
+  "athleteDisplayName": null,
+  "_debug": {
+    "intervalsAthleteSelf": {
+      "httpStatus": 403,
+      "ok": false,
+      "topLevelKeys": [
+        "status",
+        "error"
+      ],
+      "usedNestedAthlete": false
+    },
+    "profile": null
+  }
+}
+
+[2026-03-26T17:23:58.848Z] GET /challenges/1c258c1b-5825-4179-95ee-a965322cd361
+{
+  "hasHandicap": false,
+  "courseId": "170",
+  "name": "Thyro in de bocht"
+}
+
