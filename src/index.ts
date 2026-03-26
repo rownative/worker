@@ -1531,6 +1531,9 @@ function challengeToApi(row: Record<string, unknown>, courses: Array<{ id: strin
   const courseId = String(row.course_id ?? '');
   const collectionId = row.collection_id ? String(row.collection_id) : null;
   const courseFields = courseIndexFields(courses, courseId);
+  const rawOrgName = row.organizer_name;
+  const organizerName =
+    rawOrgName != null && String(rawOrgName).trim() !== '' ? String(rawOrgName).trim() : null;
   return {
     id: row.id,
     name: row.name,
@@ -1546,6 +1549,7 @@ function challengeToApi(row: Record<string, unknown>, courses: Array<{ id: strin
     collectionName: collectionNameById(collectionId, collectionNames),
     hasHandicap: !!collectionId,
     organizerId: row.organizer_id,
+    organizerName,
     resultsCount: row.results_count ?? 0,
     isPublic: (row.is_public ?? 1) !== 0,
     notes: row.notes ?? null,
@@ -1553,8 +1557,7 @@ function challengeToApi(row: Record<string, unknown>, courses: Array<{ id: strin
 }
 
 function challengeDetailToApi(row: Record<string, unknown>, courses: Array<{ id: string; name?: string; center_lat?: number; center_lon?: number; distance_m?: number }>, collectionNames: Map<string, string>): Record<string, unknown> {
-  const base = challengeToApi(row, courses, collectionNames);
-  return { ...base, organizerName: null };
+  return challengeToApi(row, courses, collectionNames);
 }
 
 async function handleListChallenges(status: string, env: Env): Promise<Response> {
@@ -1672,12 +1675,31 @@ async function handleCreateChallenge(request: Request, athleteId: string, env: E
     const isPublic = body.isPublic !== false ? 1 : 0;
     const id = crypto.randomUUID();
     const createdAt = new Date().toISOString();
+    const session = await getSessionFromRequest(request, env);
+    let organizerName: string | null = null;
+    if (session?.accessToken) {
+      const profile = await fetchIntervalsAthleteProfile(session.accessToken);
+      organizerName = profile?.name?.trim() || null;
+    }
     try {
       await env.DB.prepare(
-        `INSERT INTO challenges (id, name, course_id, row_start, row_end, submit_end, collection_id, organizer_id, is_public, notes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO challenges (id, name, course_id, row_start, row_end, submit_end, collection_id, organizer_id, organizer_name, is_public, notes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-        .bind(id, name, courseId, rowStart, rowEnd, submitEnd, collectionId, athleteId, isPublic, notes, createdAt)
+        .bind(
+          id,
+          name,
+          courseId,
+          rowStart,
+          rowEnd,
+          submitEnd,
+          collectionId,
+          athleteId,
+          organizerName,
+          isPublic,
+          notes,
+          createdAt
+        )
         .run();
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Database error';
@@ -1686,7 +1708,20 @@ async function handleCreateChallenge(request: Request, athleteId: string, env: E
     const courses = await getCourseIndex(env);
     const customColls = await loadCollectionNames(env);
     const challenge = challengeToApi(
-      { id, name, course_id: courseId, row_start: rowStart, row_end: rowEnd, submit_end: submitEnd, collection_id: collectionId, organizer_id: athleteId, is_public: isPublic, notes, results_count: 0 },
+      {
+        id,
+        name,
+        course_id: courseId,
+        row_start: rowStart,
+        row_end: rowEnd,
+        submit_end: submitEnd,
+        collection_id: collectionId,
+        organizer_id: athleteId,
+        organizer_name: organizerName,
+        is_public: isPublic,
+        notes,
+        results_count: 0,
+      },
       courses,
       customColls
     );
