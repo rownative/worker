@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
+	displayNameFromAthletePayload,
 	fetchIntervalsActivities,
 	fetchIntervalsStreams,
 	fetchIntervalsAthleteProfile,
@@ -76,6 +77,29 @@ describe('intervals-api', () => {
 		);
 		const p = await fetchIntervalsAthleteProfile('tok');
 		expect(p).toEqual({ id: 'a1', name: 'Test Rower' });
+	});
+
+	it('fetchIntervalsAthleteProfile uses firstName/lastName when name empty', async () => {
+		vi.mocked(fetch).mockResolvedValue(
+			new Response(
+				JSON.stringify({ id: 'a2', name: '', firstName: 'Ada', lastName: 'Lovelace' }),
+				{ status: 200 },
+			) as Response,
+		);
+		const p = await fetchIntervalsAthleteProfile('tok');
+		expect(p?.name).toBe('Ada Lovelace');
+		expect(p?.first_name).toBe('Ada');
+		expect(p?.last_name).toBe('Lovelace');
+	});
+
+	it('displayNameFromAthletePayload joins camelCase names', () => {
+		expect(
+			displayNameFromAthletePayload({
+				id: 'x',
+				firstName: 'Bo',
+				lastName: 'Klop',
+			}),
+		).toBe('Bo Klop');
 	});
 
 	it('fetchIntervalsAthleteProfile returns null on failure', async () => {

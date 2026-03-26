@@ -147,6 +147,24 @@ export interface IntervalsAthleteProfile {
   last_name?: string;
 }
 
+function pickString(data: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const k of keys) {
+    const v = data[k];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return undefined;
+}
+
+/** Build display name from intervals.icu athlete/self payload (field names vary by API version). */
+export function displayNameFromAthletePayload(data: Record<string, unknown>): string | undefined {
+  const direct = pickString(data, ['name', 'displayName', 'username']);
+  if (direct) return direct;
+  const first = pickString(data, ['first_name', 'firstName', 'givenName']);
+  const last = pickString(data, ['last_name', 'lastName', 'familyName']);
+  const joined = [first, last].filter(Boolean).join(' ').trim();
+  return joined || undefined;
+}
+
 /**
  * Fetch athlete profile from intervals.icu (for display name in challenge submission).
  * Requires OAuth access token. Returns null on failure.
@@ -160,14 +178,13 @@ export async function fetchIntervalsAthleteProfile(
   if (!res.ok) return null;
   const data = await res.json() as Record<string, unknown>;
   if (!data || typeof data.id !== 'string') return null;
-  const name =
-    typeof data.name === 'string' && data.name.trim()
-      ? data.name.trim()
-      : [data.first_name, data.last_name].filter(Boolean).join(' ').trim() || undefined;
+  const name = displayNameFromAthletePayload(data);
+  const first_name = pickString(data, ['first_name', 'firstName', 'givenName']);
+  const last_name = pickString(data, ['last_name', 'lastName', 'familyName']);
   return {
     id: data.id as string,
     name,
-    first_name: typeof data.first_name === 'string' ? data.first_name : undefined,
-    last_name: typeof data.last_name === 'string' ? data.last_name : undefined,
+    first_name,
+    last_name,
   };
 }
