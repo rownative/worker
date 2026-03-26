@@ -1,6 +1,6 @@
 debug=1 — challenge API traces (Worker: _debug.intervalsAthleteSelf shows intervals.icu GET /athlete/self). serve_dev mock does not call intervals.
 
-[2026-03-26T16:56:25.621Z] GET http://localhost:8787/api/me?debug=1
+[2026-03-26T17:23:58.791Z] GET http://localhost:8787/api/me?debug=1
 {
   "athleteId": "i58453",
   "liked": [
@@ -23,102 +23,10 @@ debug=1 — challenge API traces (Worker: _debug.intervalsAthleteSelf shows inte
   }
 }
 
-[2026-03-26T16:56:25.986Z] GET /challenges/1c258c1b-5825-4179-95ee-a965322cd361
+[2026-03-26T17:23:58.848Z] GET /challenges/1c258c1b-5825-4179-95ee-a965322cd361
 {
   "hasHandicap": false,
   "courseId": "170",
   "name": "Thyro in de bocht"
 }
 
-[2026-03-26T16:56:37.631Z] GET /me (modal prefill)
-{
-  "athleteId": "i58453",
-  "liked": [
-    "150",
-    "170"
-  ],
-  "isOrganizer": true,
-  "athleteDisplayName": null,
-  "_debug": {
-    "intervalsAthleteSelf": {
-      "httpStatus": 403,
-      "ok": false,
-      "topLevelKeys": [
-        "status",
-        "error"
-      ],
-      "usedNestedAthlete": false
-    },
-    "profile": null
-  }
-}
-
-[2026-03-26T16:56:37.688Z] GET /me/activities
-{
-  "count": 4,
-  "sample": {
-    "activities": [
-      {
-        "id": "i133663321",
-        "name": "JustGo-9168M",
-        "start_date_local": "2026-03-21T10:17:44",
-        "type": "Rowing"
-      },
-      {
-        "id": "i130970354",
-        "name": "Lunch Row",
-        "start_date_local": "2026-03-08T13:51:04",
-        "type": "Rowing"
-      },
-      {
-        "id": "i130970516",
-        "name": "Afternoon Row",
-        "start_date_local": "2026-03-07T16:35:01",
-        "type": "Rowing"
-      },
-      {
-        "id": "i128755173",
-        "name": "Lunch Row",
-        "start_date_local": "2026-03-01T11:30:34",
-        "type": "Rowing"
-      }
-    ]
-  }
-}
-
-[2026-03-26T16:56:40.806Z] POST submit request
-{
-  "url": "http://localhost:8787/api/challenges/1c258c1b-5825-4179-95ee-a965322cd361/submit?debug=1",
-  "body": {
-    "activityId": "i133663321",
-    "boatType": "1x"
-  }
-}
-
-[2026-03-26T16:56:41.252Z] POST submit response
-{
-  "success": true,
-  "resultId": "925ddbb5-1bf7-4d92-bdb9-81b383f6c0f9",
-  "rank": 1,
-  "rawTimeS": 324.19999999999993,
-  "correctedTimeS": 324.19999999999993,
-  "points": null,
-  "validationNote": "Course id 170, Found 2 exit times from start\nPath starting at 84.4s: completed=true, net=939.9s\nPath starting at 700.1s: completed=true, net=324.2s",
-  "replaced": true,
-  "_debug": {
-    "displayNameStored": null,
-    "displayNameFromBody": null,
-    "intervalsAthleteSelf": {
-      "httpStatus": 403,
-      "ok": false,
-      "topLevelKeys": [
-        "status",
-        "error"
-      ],
-      "usedNestedAthlete": false
-    },
-    "athleteId": "i58453",
-    "challengeId": "1c258c1b-5825-4179-95ee-a965322cd361",
-    "categoryKey": "raw"
-  }
-}
