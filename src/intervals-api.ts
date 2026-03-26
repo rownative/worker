@@ -45,7 +45,7 @@ export async function fetchIntervalsActivities(
  * Intervals.icu returns latlng as { data: lat[], data2: lon[] } (separate arrays).
  * Response may be { latlng: {...}, time: {...} } or [{ type, data, data2 }, ...].
  */
-function parseStreamsResponse(raw: unknown): IntervalsStreams {
+export function parseStreamsResponse(raw: unknown): IntervalsStreams {
   const out: IntervalsStreams = {};
   if (!raw || typeof raw !== 'object') return out;
 

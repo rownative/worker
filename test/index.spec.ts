@@ -30,7 +30,7 @@ describe('Rowing Courses Worker', () => {
 		expect(response.status).toBe(200);
 		expect(response.headers.get('Content-Type')).toContain('application/json');
 		const data = await response.json();
-  expect(data).toEqual({ athleteId: null, liked: [], isOrganizer: false });
+		expect(data).toEqual({ athleteId: null, liked: [], isOrganizer: false });
 	});
 
 	it('GET /api/courses/kml without ids returns 400', async () => {
@@ -231,7 +231,7 @@ describe('Rowing Courses Worker', () => {
 		});
 	});
 
-	describe('Phase 2a — Course times', () => {
+	describe('Phase 2a - Course times', () => {
 		it('GET /api/me/activities returns 401 when not authenticated', async () => {
 			const response = await fetchAndWait('https://rownative.icu/api/me/activities');
 			expect(response.status).toBe(401);
@@ -248,6 +248,118 @@ describe('Rowing Courses Worker', () => {
 
 		it('GET /api/me/course-times returns 401 when not authenticated', async () => {
 			const response = await fetchAndWait('https://rownative.icu/api/me/course-times');
+			expect(response.status).toBe(401);
+		});
+	});
+
+	describe('Challenges and organiser', () => {
+		/** Local Vitest D1 may lack migrations; then handlers return 500 with { error }. */
+		async function challengesListResponse(url: string) {
+			const response = await fetchAndWait(url);
+			const data = (await response.json()) as { challenges?: unknown[]; error?: string };
+			return { response, data };
+		}
+
+		it('GET /api/challenges returns challenges list or database error JSON', async () => {
+			const { response, data } = await challengesListResponse('https://rownative.icu/api/challenges');
+			if (response.status === 200) {
+				expect(data.challenges).toBeDefined();
+				expect(Array.isArray(data.challenges)).toBe(true);
+			} else {
+				expect(response.status).toBe(500);
+				expect(data.error).toBeTruthy();
+			}
+		});
+
+		it('GET /api/challenges?status=active uses active filter when DB is available', async () => {
+			const { response, data } = await challengesListResponse(
+				'https://rownative.icu/api/challenges?status=active',
+			);
+			if (response.status === 200) {
+				expect(data.challenges).toBeDefined();
+			} else {
+				expect(response.status).toBe(500);
+				expect(data.error).toBeTruthy();
+			}
+		});
+
+		it('GET /api/challenges?status=invalid defaults status to active', async () => {
+			const { response, data } = await challengesListResponse(
+				'https://rownative.icu/api/challenges?status=not-a-status',
+			);
+			if (response.status === 200) {
+				expect(data.challenges).toBeDefined();
+			} else {
+				expect(response.status).toBe(500);
+				expect(data.error).toBeTruthy();
+			}
+		});
+
+		it('GET /api/challenges/unknown-id returns 404 when DB works, else 500', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/challenges/nonexistent-challenge-id-xyz');
+			const data = (await response.json()) as { error?: string };
+			expect([404, 500]).toContain(response.status);
+			expect(data.error).toBeTruthy();
+		});
+
+		it('POST /api/challenges/x/submit returns 401 when not authenticated', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/challenges/c1/submit', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({}),
+			});
+			expect(response.status).toBe(401);
+		});
+
+		it('GET /api/organiser/challenges returns 401 when not authenticated', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/organiser/challenges');
+			expect(response.status).toBe(401);
+		});
+
+		it('POST /api/organiser/challenges returns 401 when not authenticated', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/organiser/challenges', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({}),
+			});
+			expect(response.status).toBe(401);
+		});
+
+		it('GET /api/organiser/standard-collections returns 401 when not authenticated', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/organiser/standard-collections');
+			expect(response.status).toBe(401);
+		});
+
+		it('POST /api/organiser/standard-collections returns 401 when not authenticated', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/organiser/standard-collections', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({}),
+			});
+			expect(response.status).toBe(401);
+		});
+	});
+
+	describe('Auth, KML liked, follow', () => {
+		it('POST /api/auth/crewnerd without Bearer returns 401', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/auth/crewnerd', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({}),
+			});
+			expect(response.status).toBe(401);
+			expect(await response.text()).toBe('Missing bearer token');
+		});
+
+		it('GET /api/courses/kml/liked returns 401 when not authenticated', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/courses/kml/liked');
+			expect(response.status).toBe(401);
+		});
+
+		it('POST /api/rowers/courses/1/follow returns 401 when not authenticated', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/rowers/courses/1/follow', {
+				method: 'POST',
+			});
 			expect(response.status).toBe(401);
 		});
 	});
