@@ -79,6 +79,27 @@ describe('intervals-api', () => {
 		expect(p).toEqual({ id: 'a1', name: 'Test Rower' });
 	});
 
+	it('fetchIntervalsAthleteProfile accepts numeric id', async () => {
+		vi.mocked(fetch).mockResolvedValue(
+			new Response(JSON.stringify({ id: 9001, name: 'Num Id' }), { status: 200 }) as Response,
+		);
+		const p = await fetchIntervalsAthleteProfile('tok');
+		expect(p?.id).toBe('9001');
+		expect(p?.name).toBe('Num Id');
+	});
+
+	it('fetchIntervalsAthleteProfile flattens nested athlete object', async () => {
+		vi.mocked(fetch).mockResolvedValue(
+			new Response(
+				JSON.stringify({ athlete: { id: 'n1', firstName: 'A', lastName: 'B' } }),
+				{ status: 200 },
+			) as Response,
+		);
+		const p = await fetchIntervalsAthleteProfile('tok');
+		expect(p?.id).toBe('n1');
+		expect(p?.name).toBe('A B');
+	});
+
 	it('fetchIntervalsAthleteProfile uses firstName/lastName when name empty', async () => {
 		vi.mocked(fetch).mockResolvedValue(
 			new Response(

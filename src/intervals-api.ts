@@ -155,9 +155,28 @@ function pickString(data: Record<string, unknown>, keys: string[]): string | und
   return undefined;
 }
 
+/** Merge nested objects intervals.icu sometimes returns on athlete/self. */
+function flattenAthleteJson(raw: unknown): Record<string, unknown> | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const d = raw as Record<string, unknown>;
+  const nested = d.athlete;
+  if (nested && typeof nested === 'object' && nested !== null && !Array.isArray(nested)) {
+    return { ...d, ...(nested as Record<string, unknown>) };
+  }
+  return d;
+}
+
+function athleteIdFromPayload(flat: Record<string, unknown>): string | null {
+  const rawId = flat.id;
+  if (rawId == null) return null;
+  if (typeof rawId === 'string' && rawId.trim()) return rawId.trim();
+  if (typeof rawId === 'number' && Number.isFinite(rawId)) return String(rawId);
+  return null;
+}
+
 /** Build display name from intervals.icu athlete/self payload (field names vary by API version). */
 export function displayNameFromAthletePayload(data: Record<string, unknown>): string | undefined {
-  const direct = pickString(data, ['name', 'displayName', 'username']);
+  const direct = pickString(data, ['name', 'displayName', 'username', 'nickname', 'fullname', 'fullName']);
   if (direct) return direct;
   const first = pickString(data, ['first_name', 'firstName', 'givenName']);
   const last = pickString(data, ['last_name', 'lastName', 'familyName']);
@@ -176,13 +195,16 @@ export async function fetchIntervalsAthleteProfile(
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   if (!res.ok) return null;
-  const data = await res.json() as Record<string, unknown>;
-  if (!data || typeof data.id !== 'string') return null;
+  const raw = await res.json();
+  const data = flattenAthleteJson(raw);
+  if (!data) return null;
+  const id = athleteIdFromPayload(data);
+  if (!id) return null;
   const name = displayNameFromAthletePayload(data);
   const first_name = pickString(data, ['first_name', 'firstName', 'givenName']);
   const last_name = pickString(data, ['last_name', 'lastName', 'familyName']);
   return {
-    id: data.id as string,
+    id,
     name,
     first_name,
     last_name,

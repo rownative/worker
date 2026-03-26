@@ -253,7 +253,13 @@ export default {
         let athleteDisplayName: string | undefined;
         if (session?.accessToken) {
           const profile = await fetchIntervalsAthleteProfile(session.accessToken);
-          athleteDisplayName = profile?.name;
+          if (profile) {
+            const fromParts = [profile.first_name, profile.last_name]
+              .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+              .map((s) => s.trim())
+              .join(' ');
+            athleteDisplayName = profile.name?.trim() || fromParts || undefined;
+          }
         }
         const [liked, isOrg] = await Promise.all([
           env.ROWING_COURSES.get(`liked:${athleteId}`).then((v) => JSON.parse(v ?? '[]') as string[]),
@@ -788,8 +794,9 @@ async function verifyIntervalsToken(bearerToken: string): Promise<string | null>
     headers: { 'Authorization': `Bearer ${bearerToken}` },
   });
   if (!res.ok) return null;
-  const data = await res.json() as { id: string };
-  return data.id ?? null;
+  const data = await res.json() as { id?: string | number };
+  if (data.id == null) return null;
+  return typeof data.id === 'number' && Number.isFinite(data.id) ? String(data.id) : String(data.id).trim() || null;
 }
 
 interface Session {
