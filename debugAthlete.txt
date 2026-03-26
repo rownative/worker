@@ -1,6 +1,6 @@
 debug=1 — challenge API traces (Worker: _debug.intervalsAthleteSelf shows intervals.icu GET /athlete/self). serve_dev mock does not call intervals.
 
-[2026-03-26T16:50:15.181Z] GET http://localhost:8787/api/me?debug=1
+[2026-03-26T16:56:25.621Z] GET http://localhost:8787/api/me?debug=1
 {
   "athleteId": "i58453",
   "liked": [
@@ -23,14 +23,14 @@ debug=1 — challenge API traces (Worker: _debug.intervalsAthleteSelf shows inte
   }
 }
 
-[2026-03-26T16:50:15.573Z] GET /challenges/1c258c1b-5825-4179-95ee-a965322cd361
+[2026-03-26T16:56:25.986Z] GET /challenges/1c258c1b-5825-4179-95ee-a965322cd361
 {
   "hasHandicap": false,
   "courseId": "170",
   "name": "Thyro in de bocht"
 }
 
-[2026-03-26T16:50:33.126Z] GET /me (modal prefill)
+[2026-03-26T16:56:37.631Z] GET /me (modal prefill)
 {
   "athleteId": "i58453",
   "liked": [
@@ -53,7 +53,7 @@ debug=1 — challenge API traces (Worker: _debug.intervalsAthleteSelf shows inte
   }
 }
 
-[2026-03-26T16:50:33.178Z] GET /me/activities
+[2026-03-26T16:56:37.688Z] GET /me/activities
 {
   "count": 4,
   "sample": {
@@ -86,7 +86,7 @@ debug=1 — challenge API traces (Worker: _debug.intervalsAthleteSelf shows inte
   }
 }
 
-[2026-03-26T16:50:37.574Z] POST submit request
+[2026-03-26T16:56:40.806Z] POST submit request
 {
   "url": "http://localhost:8787/api/challenges/1c258c1b-5825-4179-95ee-a965322cd361/submit?debug=1",
   "body": {
@@ -95,7 +95,7 @@ debug=1 — challenge API traces (Worker: _debug.intervalsAthleteSelf shows inte
   }
 }
 
-[2026-03-26T16:50:38.038Z] POST submit response
+[2026-03-26T16:56:41.252Z] POST submit response
 {
   "success": true,
   "resultId": "925ddbb5-1bf7-4d92-bdb9-81b383f6c0f9",
