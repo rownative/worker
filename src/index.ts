@@ -2115,14 +2115,23 @@ async function handleChallengeSubmit(
     }, 400, true);
   }
 
-  const displayNameRaw = body.displayName?.trim() || null;
-  if (displayNameRaw) {
-    const displayCheck = isNameAllowed(displayNameRaw);
+  let displayName: string | null = body.displayName?.trim() || null;
+  if (!displayName) {
+    const profile = await fetchIntervalsAthleteProfile(session.accessToken);
+    if (profile) {
+      const fromParts = [profile.first_name, profile.last_name]
+        .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+        .map((s) => s.trim())
+        .join(' ');
+      displayName = profile.name?.trim() || fromParts || null;
+    }
+  }
+  if (displayName) {
+    const displayCheck = isNameAllowed(displayName);
     if (!displayCheck.allowed) {
       return jsonResponse({ error: displayCheck.reason ?? "That name isn't allowed." }, 400, true);
     }
   }
-  const displayName = displayNameRaw;
   const boatType = body.boatType ? String(body.boatType).trim() || null : null;
   const sex = body.sex ? String(body.sex).trim() || null : null;
   const weightClass = body.weightClass ? String(body.weightClass).trim() || null : null;
