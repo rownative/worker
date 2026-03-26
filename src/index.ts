@@ -1747,6 +1747,18 @@ async function handleCreateChallenge(request: Request, athleteId: string, env: E
     if (!name || !courseId || !rowStart || !rowEnd || !submitEnd) {
       return jsonResponse({ error: 'name, courseId, rowStart, rowEnd, submitEnd required' }, 400, true, request);
     }
+    const rs = new Date(rowStart);
+    const re = new Date(rowEnd);
+    const se = new Date(submitEnd);
+    if (Number.isNaN(rs.getTime()) || Number.isNaN(re.getTime()) || Number.isNaN(se.getTime())) {
+      return jsonResponse({ error: 'Invalid rowStart, rowEnd, or submitEnd datetime' }, 400, true, request);
+    }
+    if (re <= rs) {
+      return jsonResponse({ error: 'rowEnd must be after rowStart' }, 400, true, request);
+    }
+    if (se < re) {
+      return jsonResponse({ error: 'submitEnd must be on or after rowEnd' }, 400, true, request);
+    }
     const nameCheck = isNameAllowed(name);
     if (!nameCheck.allowed) {
       return jsonResponse({ error: nameCheck.reason ?? "That name isn't allowed." }, 400, true, request);
