@@ -106,6 +106,7 @@ describe('Rowing Courses Worker', () => {
 			expect(location).toContain('https://intervals.icu/oauth/authorize');
 			expect(location).toContain('state=');
 			expect(location).toContain('response_type=code');
+			expect(location).toContain('SETTINGS%3AREAD');
 			const setCookie = response.headers.get('Set-Cookie') ?? '';
 			expect(setCookie).toContain('rn_oauth_state=');
 			expect(setCookie).toContain('HttpOnly');

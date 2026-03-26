@@ -279,6 +279,9 @@ export default {
               hasLast: !!profile.last_name?.trim(),
             };
           }
+          if (!athleteDisplayName && session.oauthAthleteName?.trim()) {
+            athleteDisplayName = session.oauthAthleteName.trim();
+          }
         }
         const [liked, isOrg] = await Promise.all([
           env.ROWING_COURSES.get(`liked:${athleteId}`).then((v) => JSON.parse(v ?? '[]') as string[]),
@@ -370,7 +373,8 @@ export default {
         client_id: env.INTERVALS_CLIENT_ID,
         redirect_uri: redirectUri,
         response_type: 'code',
-        scope: 'ACTIVITY:READ',
+        // ACTIVITY: streams/activities; SETTINGS: athlete profile GET (forum: "Athlete settings")
+        scope: 'ACTIVITY:READ,SETTINGS:READ',
         state,
       });
       const stateCookieSecure = isLocal ? '' : '; Secure';
@@ -434,14 +438,23 @@ export default {
         return new Response(`Token exchange failed: ${tokenRes.status} ${body}`, { status: 500 });
       }
 
-      // Athlete ID is included in the token response — no separate profile call needed
+      // Token response includes athlete id + name (see intervals.icu OAuth docs) — persist name for /api/me when GET /athlete/* returns 403.
       const tokens = await tokenRes.json() as {
         access_token: string;
-        scope: string;
-        athlete: { id: string; name: string };
+        scope?: string;
+        athlete?: { id?: string | number; name?: string };
       };
-
-      const athleteId = tokens.athlete.id;
+      if (!tokens.access_token) {
+        return new Response('Token exchange: missing access_token', { status: 500 });
+      }
+      const ath = tokens.athlete;
+      if (!ath || ath.id == null) {
+        return new Response('Token exchange: missing athlete', { status: 500 });
+      }
+      const athleteId =
+        typeof ath.id === 'number' && Number.isFinite(ath.id) ? String(ath.id) : String(ath.id).trim();
+      const oauthAthleteName =
+        typeof ath.name === 'string' && ath.name.trim() ? ath.name.trim() : undefined;
 
       // Encrypt session and set cookie
       // intervals.icu does not use refresh tokens or expiry — store access token only
@@ -450,6 +463,7 @@ export default {
         accessToken: tokens.access_token,
         refreshToken: '',
         expiresAt: 0, // no expiry
+        ...(oauthAthleteName ? { oauthAthleteName } : {}),
       };
       const cookie = await encryptSession(session, env.TOKEN_ENCRYPTION_KEY);
       const postAuthRedirect = (isLocal && returnTo) ? returnTo : (isLocal ? 'http://localhost:8080/' : '/');
@@ -862,6 +876,8 @@ interface Session {
   accessToken: string;
   refreshToken: string;
   expiresAt: number;
+  /** Display name from OAuth token exchange (intervals.icu returns athlete.name); used when GET /api/v1/athlete/* is forbidden. */
+  oauthAthleteName?: string;
 }
 
 async function encryptSession(session: Session, secret: string): Promise<string> {
@@ -1750,7 +1766,14 @@ async function handleCreateChallenge(request: Request, athleteId: string, env: E
     let organizerName: string | null = null;
     if (session?.accessToken) {
       const profile = await fetchIntervalsAthleteProfile(session.accessToken, athleteId);
-      organizerName = profile?.name?.trim() || null;
+      organizerName =
+        profile?.name?.trim() ||
+        [profile?.first_name, profile?.last_name]
+          .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+          .map((s) => s.trim())
+          .join(' ') ||
+        session.oauthAthleteName?.trim() ||
+        null;
     }
     try {
       await env.DB.prepare(
@@ -2193,6 +2216,9 @@ async function handleChallengeSubmit(
         .map((s) => s.trim())
         .join(' ');
       displayName = profile.name?.trim() || fromParts || null;
+    }
+    if (!displayName && session.oauthAthleteName?.trim()) {
+      displayName = session.oauthAthleteName.trim();
     }
   } else if (debugSubmit) {
     const { meta } = await fetchIntervalsAthleteProfileWithMeta(session.accessToken, athleteId);
