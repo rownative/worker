@@ -186,6 +186,49 @@ describe('Rowing Courses Worker', () => {
 			expect(setCookie).toContain('rn_session=');
 			expect(setCookie).toContain('Max-Age=0');
 		});
+
+		it('GET /oauth/logout with local=1 rejects external return_to (open redirect)', async () => {
+			const response = await fetchAndWait(
+				'https://rownative.icu/oauth/logout?local=1&return_to=https://evil.com/steal',
+			);
+			expect(response.status).toBe(302);
+			expect(response.headers.get('Location')).toBe('http://localhost:8080/');
+		});
+
+		it('GET /oauth/logout with local=1 accepts safe return_to to localhost', async () => {
+			const response = await fetchAndWait(
+				'https://rownative.icu/oauth/logout?local=1&return_to=http://localhost:3000/app',
+			);
+			expect(response.status).toBe(302);
+			expect(response.headers.get('Location')).toBe('http://localhost:3000/app');
+		});
+	});
+
+	describe('CORS origin validation', () => {
+		it('GET /api/me does not reflect Origin http://evil-localhost.com', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/me', {
+				headers: { Origin: 'http://evil-localhost.com' },
+			});
+			expect(response.status).toBe(200);
+			expect(response.headers.get('Access-Control-Allow-Origin')).toBe('https://rownative.icu');
+		});
+
+		it('GET /api/me reflects legitimate localhost Origin', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/me', {
+				headers: { Origin: 'http://localhost:8080' },
+			});
+			expect(response.status).toBe(200);
+			expect(response.headers.get('Access-Control-Allow-Origin')).toBe('http://localhost:8080');
+		});
+
+		it('OPTIONS preflight does not reflect Origin http://evil-localhost.com', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/me', {
+				method: 'OPTIONS',
+				headers: { Origin: 'http://evil-localhost.com' },
+			});
+			expect(response.status).toBe(204);
+			expect(response.headers.get('Access-Control-Allow-Origin')).toBe('https://rownative.icu');
+		});
 	});
 
 	describe('Phase 2a — Course times', () => {

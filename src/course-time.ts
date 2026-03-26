@@ -255,7 +255,6 @@ export function calculateCourseTime(
 
   const interpolated = interpolateTrack(track);
   const withDist = addCumulativeDistance(interpolated, haversineFn);
-  const paths = course.polygons.map((p) => polygonToPath(p));
 
   let entryTimes: number[];
   try {

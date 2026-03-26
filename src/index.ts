@@ -18,6 +18,119 @@ const GITHUB_API = 'https://api.github.com';
 const ORGANISERS_CACHE_KEY = 'organisers:list';
 const ORGANISERS_CACHE_TTL = 300; // 5 minutes
 
+const MAX_ZIP_UPLOAD_BYTES = 10 * 1024 * 1024;
+const MAX_KML_UPLOAD_BYTES = 1 * 1024 * 1024;
+
+function isLocalHostname(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h === '::1';
+}
+
+function isLocalOrigin(origin: string): boolean {
+  if (!origin) return false;
+  try {
+    const u = new URL(origin);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    return isLocalHostname(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function corsAllowOrigin(request: Request): string {
+  const origin = request.headers.get('Origin') ?? '';
+  return isLocalOrigin(origin) ? origin : 'https://rownative.icu';
+}
+
+/** Only http(s) to localhost or loopback; prevents open redirects via return_to. */
+function safeLocalReturnTo(raw: string | null): string | null {
+  if (!raw || !raw.trim()) return null;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    if (!isLocalHostname(u.hostname)) return null;
+    return u.href;
+  } catch {
+    return null;
+  }
+}
+
+function hostnameFromHostHeader(host: string): string | null {
+  if (!host) return null;
+  try {
+    return new URL(`http://${host}`).hostname;
+  } catch {
+    return null;
+  }
+}
+
+function isLocalDevRequest(request: Request, requestUrl: URL): boolean {
+  const host = request.headers.get('Host') ?? '';
+  const origin = request.headers.get('Origin') ?? '';
+  const hn = hostnameFromHostHeader(host);
+  if (hn && isLocalHostname(hn)) return true;
+  if (isLocalOrigin(origin)) return true;
+  if (isLocalHostname(requestUrl.hostname)) return true;
+  return false;
+}
+
+function uint8ToBase64(bytes: Uint8Array): string {
+  const chunk = 8192;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+function base64UrlToBytes(s: string): Uint8Array | null {
+  let b64 = s.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = b64.length % 4;
+  if (pad) b64 += '='.repeat(4 - pad);
+  try {
+    const binary = atob(b64);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+async function verifyApiKeyMac(athleteId: string, macBase64Url: string, secret: string): Promise<boolean> {
+  const sig = base64UrlToBytes(macBase64Url);
+  if (!sig) return false;
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['verify'],
+  );
+  try {
+    return await crypto.subtle.verify(
+      { name: 'HMAC', hash: 'SHA-256' },
+      key,
+      sig,
+      new TextEncoder().encode(athleteId),
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function githubApiError(res: Response): Promise<string> {
+  const text = await res.text();
+  let msg: string;
+  try {
+    const j = JSON.parse(text) as { message?: string };
+    msg = j.message ?? text;
+  } catch {
+    msg = text || res.statusText;
+  }
+  return `GitHub API (${res.status}): ${msg}`;
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -25,8 +138,7 @@ export default {
 
     // CORS preflight — required for credentialed POST from localhost
     if (request.method === 'OPTIONS') {
-      const origin = request.headers.get('Origin') ?? '';
-      const allowOrigin = origin.includes('localhost') || origin.includes('127.0.0.1') ? origin : 'https://rownative.icu';
+      const allowOrigin = corsAllowOrigin(request);
       return new Response(null, {
         status: 204,
         headers: {
@@ -63,8 +175,7 @@ export default {
           })
         : courses;
 
-      const origin = request.headers.get('Origin') ?? '';
-      const allowOrigin = origin.includes('localhost') || origin.includes('127.0.0.1') ? origin : 'https://rownative.icu';
+      const allowOrigin = corsAllowOrigin(request);
       return new Response(JSON.stringify({ courses: filtered }), {
         headers: {
           'Content-Type': 'application/json',
@@ -137,8 +248,7 @@ export default {
       } else {
         payload = { athleteId: null, liked: [], isOrganizer: false };
       }
-      const origin = request.headers.get('Origin') ?? '';
-      const allowOrigin = origin.includes('localhost') || origin.includes('127.0.0.1') ? origin : 'https://rownative.icu';
+      const allowOrigin = corsAllowOrigin(request);
       return new Response(JSON.stringify(payload), {
         headers: {
           'Content-Type': 'application/json',
@@ -167,8 +277,9 @@ export default {
     if (path === '/oauth/debug') {
       const localParam = url.searchParams.get('local') === '1';
       const hostHeader = request.headers.get('Host') ?? '';
-      const isLocalByHost = hostHeader.startsWith('localhost') || hostHeader.startsWith('127.0.0.1');
-      const isLocalByUrl = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+      const hostName = hostnameFromHostHeader(hostHeader);
+      const isLocalByHost = hostName !== null && isLocalHostname(hostName);
+      const isLocalByUrl = isLocalHostname(url.hostname);
       const isLocal = localParam || isLocalByHost || isLocalByUrl;
       const redirectUri = isLocal
         ? 'http://localhost:8787/oauth/callback'
@@ -189,14 +300,17 @@ export default {
     if (path === '/oauth/authorize') {
       const localParam = url.searchParams.get('local') === '1';
       const hostHeader = request.headers.get('Host') ?? '';
-      const isLocal = localParam || hostHeader.startsWith('localhost') || hostHeader.startsWith('127.0.0.1')
-        || url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+      const hostName = hostnameFromHostHeader(hostHeader);
+      const isLocal = localParam
+        || (hostName !== null && isLocalHostname(hostName))
+        || isLocalHostname(url.hostname);
       const redirectUri = isLocal ? 'http://localhost:8787/oauth/callback' : 'https://rownative.icu/oauth/callback';
       const state = crypto.randomUUID();
-      const returnTo = url.searchParams.get('return_to');
+      const returnToParam = url.searchParams.get('return_to');
+      const safeReturn = safeLocalReturnTo(returnToParam);
       console.log(`[oauth] authorize: generated state=${state}, redirect_uri=${redirectUri}`);
       // Store state in KV; value 'local' or 'local:<returnTo>' signals local dev
-      const stateVal = isLocal ? (returnTo ? `local:${returnTo}` : 'local') : '1';
+      const stateVal = isLocal ? (safeReturn ? `local:${safeReturn}` : 'local') : '1';
       await env.ROWING_COURSES.put(`oauth_state:${state}`, stateVal, { expirationTtl: 600 });
       const params = new URLSearchParams({
         client_id: env.INTERVALS_CLIENT_ID,
@@ -236,7 +350,8 @@ export default {
       }
       await env.ROWING_COURSES.delete(`oauth_state:${state}`);
       const isLocal = kvVal === 'local' || (typeof kvVal === 'string' && kvVal.startsWith('local:'));
-      const returnTo = (typeof kvVal === 'string' && kvVal.startsWith('local:')) ? kvVal.slice(6) : null;
+      const returnToRaw = (typeof kvVal === 'string' && kvVal.startsWith('local:')) ? kvVal.slice(6) : null;
+      const returnTo = safeLocalReturnTo(returnToRaw);
 
       const redirectUri = isLocal ? 'http://localhost:8787/oauth/callback' : 'https://rownative.icu/oauth/callback';
 
@@ -288,11 +403,14 @@ export default {
     // OAuth logout
     if (path === '/oauth/logout') {
       const localParam = url.searchParams.get('local') === '1';
-      const returnTo = url.searchParams.get('return_to');
+      const returnToParam = url.searchParams.get('return_to');
+      const safeReturn = safeLocalReturnTo(returnToParam);
       const hostHeader = request.headers.get('Host') ?? '';
-      const isLocal = localParam || hostHeader.startsWith('localhost') || hostHeader.startsWith('127.0.0.1')
-        || url.hostname === 'localhost' || url.hostname === '127.0.0.1';
-      const logoutRedirect = (isLocal && returnTo) ? returnTo : (isLocal ? 'http://localhost:8080/' : '/');
+      const hostName = hostnameFromHostHeader(hostHeader);
+      const isLocal = localParam
+        || (hostName !== null && isLocalHostname(hostName))
+        || isLocalHostname(url.hostname);
+      const logoutRedirect = (isLocal && safeReturn) ? safeReturn : (isLocal ? 'http://localhost:8080/' : '/');
       const logoutCookieSecure = isLocal ? '' : '; Secure';
       return new Response(null, {
         status: 302,
@@ -339,7 +457,7 @@ export default {
       const activityId = trackMatch[1];
       const session = await getSessionFromRequest(request, env);
       if (!session) return jsonResponse({ error: 'Unauthorised' }, 401, true, request);
-      return withCors(await handleGetActivityTrack(activityId, session, env), request);
+      return withCors(await handleGetActivityTrack(activityId, session), request);
     }
 
     // GET /api/me/activities — OTW rowing, last month
@@ -530,9 +648,8 @@ async function getAthleteIdFromRequest(request: Request, env: Env): Promise<stri
     if (dot === -1) return null;
     const athleteId = key.slice(0, dot);
     const mac = key.slice(dot + 1);
-    const expected = await apiKeyForAthlete(athleteId, env.TOKEN_ENCRYPTION_KEY);
-    const expectedMac = expected.slice(expected.indexOf('.') + 1);
-    if (mac !== expectedMac) return null;
+    const ok = await verifyApiKeyMac(athleteId, mac, env.TOKEN_ENCRYPTION_KEY);
+    if (!ok) return null;
     return athleteId;
   }
   return null;
@@ -569,10 +686,8 @@ async function getOrganiserIds(env: Env): Promise<Set<string>> {
 /** Check if athlete is an organiser (from organisers.json). */
 async function isOrganizer(athleteId: string, env: Env, request?: Request): Promise<boolean> {
   if (request) {
-    const host = request.headers.get('Host') ?? '';
-    const origin = request.headers.get('Origin') ?? '';
-    if (host.startsWith('localhost') || host.startsWith('127.0.0.1') ||
-        origin.includes('localhost') || origin.includes('127.0.0.1')) {
+    const reqUrl = new URL(request.url);
+    if (isLocalDevRequest(request, reqUrl)) {
       return true; // dev: any signed-in user can act as organiser
     }
   }
@@ -602,7 +717,7 @@ async function notifyAdminsNewChallenge(
 - **View:** ${viewUrl}`;
 
   try {
-    const res = await fetch(`https://api.github.com/repos/${owner}/${repoName}/issues`, {
+    const res = await fetch(`${GITHUB_API}/repos/${owner}/${repoName}/issues`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -635,7 +750,7 @@ async function apiKeyForAthlete(athleteId: string, secret: string): Promise<stri
     { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
   );
   const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(athleteId));
-  const mac = btoa(String.fromCharCode(...new Uint8Array(sig)))
+  const mac = uint8ToBase64(new Uint8Array(sig))
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
   return `${athleteId}.${mac}`;
 }
@@ -665,7 +780,7 @@ async function encryptSession(session: Session, secret: string): Promise<string>
   combined.set(iv, 0);
   combined.set(new Uint8Array(ciphertext), iv.byteLength);
   // Use URL-safe base64 (no +, /, or = padding) to avoid cookie-encoding pitfalls
-  return btoa(String.fromCharCode(...combined))
+  return uint8ToBase64(combined)
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 }
 
@@ -696,11 +811,8 @@ async function getAesKey(secret: string): Promise<CryptoKey> {
 // ── Import ZIP ─────────────────────────────────────────────────────────────────
 
 function corsHeaders(request: Request): Record<string, string> {
-  const origin = request.headers.get('Origin') ?? '';
-  const allowOrigin =
-    origin.includes('localhost') || origin.includes('127.0.0.1') ? origin : 'https://rownative.icu';
   return {
-    'Access-Control-Allow-Origin': allowOrigin,
+    'Access-Control-Allow-Origin': corsAllowOrigin(request),
     'Access-Control-Allow-Credentials': 'true',
   };
 }
@@ -747,7 +859,10 @@ async function handleImportZip(request: Request, env: Env, athleteId: string): P
 
   const file = formData.get('file');
   if (!(file instanceof Blob)) {
-    return jsonResponse({ error: 'Missing file field' }, 400, true);
+    return jsonResponse({ error: 'Missing file field' }, 400, true, request);
+  }
+  if (file.size > MAX_ZIP_UPLOAD_BYTES) {
+    return jsonResponse({ error: 'ZIP file too large (max 10 MB)' }, 413, true, request);
   }
   const zipBytes = new Uint8Array(await file.arrayBuffer());
 
@@ -842,7 +957,7 @@ async function fetchCourseIndex(env: Env): Promise<Array<{ id: string }>> {
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
   const res = await fetch(
-    `https://api.github.com/repos/${owner}/${repoName}/contents/courses/index.json?ref=main`,
+    `${GITHUB_API}/repos/${owner}/${repoName}/contents/courses/index.json?ref=main`,
     { headers }
   );
   if (!res.ok) return [];
@@ -874,7 +989,7 @@ async function courseFileExistsOnMain(env: Env, id: string): Promise<boolean> {
   };
 
   const res = await fetch(
-    `https://api.github.com/repos/${owner}/${repoName}/contents/courses/${id}.json?ref=main`,
+    `${GITHUB_API}/repos/${owner}/${repoName}/contents/courses/${id}.json?ref=main`,
     { headers }
   );
   return res.ok;
@@ -898,7 +1013,7 @@ async function getCourseFileOnMain(
   };
 
   const res = await fetch(
-    `https://api.github.com/repos/${owner}/${repoName}/contents/courses/${id}.json?ref=main`,
+    `${GITHUB_API}/repos/${owner}/${repoName}/contents/courses/${id}.json?ref=main`,
     { headers }
   );
   if (!res.ok) return null;
@@ -949,7 +1064,10 @@ async function handleSubmitKml(request: Request, env: Env): Promise<Response> {
 
   const file = formData.get('file');
   if (!(file instanceof Blob)) {
-    return jsonResponse({ error: 'Missing file field' }, 400, true);
+    return jsonResponse({ error: 'Missing file field' }, 400, true, request);
+  }
+  if (file.size > MAX_KML_UPLOAD_BYTES) {
+    return jsonResponse({ error: 'KML file too large (max 1 MB)' }, 413, true, request);
   }
   const kmlText = await file.text();
   const nameOverride = formData.get('name');
@@ -1014,7 +1132,10 @@ async function handleUpdateKml(request: Request, env: Env): Promise<Response> {
 
   const file = formData.get('file');
   if (!(file instanceof Blob)) {
-    return jsonResponse({ error: 'Missing KML file' }, 400, true);
+    return jsonResponse({ error: 'Missing KML file' }, 400, true, request);
+  }
+  if (file.size > MAX_KML_UPLOAD_BYTES) {
+    return jsonResponse({ error: 'KML file too large (max 1 MB)' }, 413, true, request);
   }
   const kmlText = await file.text();
   const nameOverride = formData.get('name');
@@ -2088,39 +2209,27 @@ async function openCoursePR(
     'User-Agent': 'rownative-worker',
   };
 
-  async function ghError(res: Response): Promise<string> {
-    const text = await res.text();
-    let msg: string;
-    try {
-      const j = JSON.parse(text) as { message?: string };
-      msg = j.message ?? text;
-    } catch {
-      msg = text || res.statusText;
-    }
-    return `GitHub API (${res.status}): ${msg}`;
-  }
-
-  const mainRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/git/ref/heads/main`, {
+  const mainRes = await fetch(`${GITHUB_API}/repos/${owner}/${repoName}/git/ref/heads/main`, {
     headers,
   });
-  if (!mainRes.ok) return { ok: false, error: await ghError(mainRes) };
+  if (!mainRes.ok) return { ok: false, error: await githubApiError(mainRes) };
 
   const mainRef = (await mainRes.json()) as { object: { sha: string } };
   const mainSha = mainRef.object.sha;
 
-  const createBranchRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/git/refs`, {
+  const createBranchRes = await fetch(`${GITHUB_API}/repos/${owner}/${repoName}/git/refs`, {
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({ ref: `refs/heads/${branchName}`, sha: mainSha }),
   });
-  if (!createBranchRes.ok) return { ok: false, error: await ghError(createBranchRes) };
+  if (!createBranchRes.ok) return { ok: false, error: await githubApiError(createBranchRes) };
 
   const courseJsonStr = JSON.stringify(courseJson, null, 2);
-  const courseB64 = btoa(String.fromCharCode(...new TextEncoder().encode(courseJsonStr)));
-  const kmlB64 = btoa(String.fromCharCode(...new TextEncoder().encode(kmlContent)));
+  const courseB64 = uint8ToBase64(new TextEncoder().encode(courseJsonStr));
+  const kmlB64 = uint8ToBase64(new TextEncoder().encode(kmlContent));
 
   const putJson = await fetch(
-    `https://api.github.com/repos/${owner}/${repoName}/contents/courses/${id}.json`,
+    `${GITHUB_API}/repos/${owner}/${repoName}/contents/courses/${id}.json`,
     {
       method: 'PUT',
       headers: { ...headers, 'Content-Type': 'application/json' },
@@ -2131,10 +2240,10 @@ async function openCoursePR(
       }),
     }
   );
-  if (!putJson.ok) return { ok: false, error: await ghError(putJson) };
+  if (!putJson.ok) return { ok: false, error: await githubApiError(putJson) };
 
   const putKml = await fetch(
-    `https://api.github.com/repos/${owner}/${repoName}/contents/kml/${id}.kml`,
+    `${GITHUB_API}/repos/${owner}/${repoName}/contents/kml/${id}.kml`,
     {
       method: 'PUT',
       headers: { ...headers, 'Content-Type': 'application/json' },
@@ -2145,9 +2254,9 @@ async function openCoursePR(
       }),
     }
   );
-  if (!putKml.ok) return { ok: false, error: await ghError(putKml) };
+  if (!putKml.ok) return { ok: false, error: await githubApiError(putKml) };
 
-  const prRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/pulls`, {
+  const prRes = await fetch(`${GITHUB_API}/repos/${owner}/${repoName}/pulls`, {
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -2157,7 +2266,7 @@ async function openCoursePR(
       body,
     }),
   });
-  if (!prRes.ok) return { ok: false, error: await ghError(prRes) };
+  if (!prRes.ok) return { ok: false, error: await githubApiError(prRes) };
   const pr = (await prRes.json()) as { html_url?: string };
   const prUrl = pr.html_url ?? null;
   return prUrl ? { ok: true, prUrl } : { ok: false, error: 'GitHub did not return PR URL' };
@@ -2187,38 +2296,26 @@ async function openCourseUpdatePR(
     'User-Agent': 'rownative-worker',
   };
 
-  async function ghError(res: Response): Promise<string> {
-    const text = await res.text();
-    let msg: string;
-    try {
-      const j = JSON.parse(text) as { message?: string };
-      msg = j.message ?? text;
-    } catch {
-      msg = text || res.statusText;
-    }
-    return `GitHub API (${res.status}): ${msg}`;
-  }
-
-  const mainRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/git/ref/heads/main`, {
+  const mainRes = await fetch(`${GITHUB_API}/repos/${owner}/${repoName}/git/ref/heads/main`, {
     headers,
   });
-  if (!mainRes.ok) return { ok: false, error: await ghError(mainRes) };
+  if (!mainRes.ok) return { ok: false, error: await githubApiError(mainRes) };
 
   const mainRef = (await mainRes.json()) as { object: { sha: string } };
   const mainSha = mainRef.object.sha;
 
-  const createBranchRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/git/refs`, {
+  const createBranchRes = await fetch(`${GITHUB_API}/repos/${owner}/${repoName}/git/refs`, {
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({ ref: `refs/heads/${branchName}`, sha: mainSha }),
   });
-  if (!createBranchRes.ok) return { ok: false, error: await ghError(createBranchRes) };
+  if (!createBranchRes.ok) return { ok: false, error: await githubApiError(createBranchRes) };
 
   const courseJsonStr = JSON.stringify(courseJson, null, 2);
-  const courseB64 = btoa(String.fromCharCode(...new TextEncoder().encode(courseJsonStr)));
+  const courseB64 = uint8ToBase64(new TextEncoder().encode(courseJsonStr));
 
   const putJson = await fetch(
-    `https://api.github.com/repos/${owner}/${repoName}/contents/courses/${id}.json`,
+    `${GITHUB_API}/repos/${owner}/${repoName}/contents/courses/${id}.json`,
     {
       method: 'PUT',
       headers: { ...headers, 'Content-Type': 'application/json' },
@@ -2230,9 +2327,9 @@ async function openCourseUpdatePR(
       }),
     }
   );
-  if (!putJson.ok) return { ok: false, error: await ghError(putJson) };
+  if (!putJson.ok) return { ok: false, error: await githubApiError(putJson) };
 
-  const prRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/pulls`, {
+  const prRes = await fetch(`${GITHUB_API}/repos/${owner}/${repoName}/pulls`, {
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -2242,7 +2339,7 @@ async function openCourseUpdatePR(
       body: `Revised geometry via rownative.icu. Course: ${courseName}`,
     }),
   });
-  if (!prRes.ok) return { ok: false, error: await ghError(prRes) };
+  if (!prRes.ok) return { ok: false, error: await githubApiError(prRes) };
   const pr = (await prRes.json()) as { html_url?: string };
   const prUrl = pr.html_url ?? null;
   return prUrl ? { ok: true, prUrl } : { ok: false, error: 'GitHub did not return PR URL' };
