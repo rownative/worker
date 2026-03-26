@@ -184,7 +184,10 @@ export function displayNameFromAthletePayload(data: Record<string, unknown>): st
   return joined || undefined;
 }
 
-/** Metadata from GET /api/v1/athlete/self (for debug=1 troubleshooting). */
+/**
+ * Metadata from GET /api/v1/athlete/{id} (for debug=1 troubleshooting).
+ * Note: /api/v1/athlete/self often returns 403 for OAuth tokens; use the concrete athlete id (same as /activities).
+ */
 export interface IntervalsAthleteSelfMeta {
   httpStatus: number;
   ok: boolean;
@@ -195,11 +198,24 @@ export interface IntervalsAthleteSelfMeta {
 
 /**
  * Same as fetchIntervalsAthleteProfile plus response metadata (single HTTP request).
+ * @param athleteId intervals.icu athlete id (e.g. i58453) — must match session; not "self".
  */
 export async function fetchIntervalsAthleteProfileWithMeta(
-  accessToken: string
+  accessToken: string,
+  athleteId: string
 ): Promise<{ profile: IntervalsAthleteProfile | null; meta: IntervalsAthleteSelfMeta }> {
-  const res = await fetch(`${INTERVALS_BASE}/api/v1/athlete/self`, {
+  const id = String(athleteId || '').trim();
+  if (!id) {
+    const meta: IntervalsAthleteSelfMeta = {
+      httpStatus: 0,
+      ok: false,
+      topLevelKeys: [],
+      usedNestedAthlete: false,
+      parseError: 'missing athleteId',
+    };
+    return { profile: null, meta };
+  }
+  const res = await fetch(`${INTERVALS_BASE}/api/v1/athlete/${encodeURIComponent(id)}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   const text = await res.text();
@@ -240,8 +256,8 @@ export async function fetchIntervalsAthleteProfileWithMeta(
   if (!data) {
     return { profile: null, meta };
   }
-  const id = athleteIdFromPayload(data);
-  if (!id) {
+  const profileId = athleteIdFromPayload(data);
+  if (!profileId) {
     return { profile: null, meta };
   }
   const name = displayNameFromAthletePayload(data);
@@ -249,7 +265,7 @@ export async function fetchIntervalsAthleteProfileWithMeta(
   const last_name = pickString(data, ['last_name', 'lastName', 'familyName']);
   return {
     profile: {
-      id,
+      id: profileId,
       name,
       first_name,
       last_name,
@@ -260,11 +276,12 @@ export async function fetchIntervalsAthleteProfileWithMeta(
 
 /**
  * Fetch athlete profile from intervals.icu (for display name in challenge submission).
- * Requires OAuth access token. Returns null on failure.
+ * Requires OAuth access token and athlete id (same path segment as /athlete/{id}/activities).
  */
 export async function fetchIntervalsAthleteProfile(
-  accessToken: string
+  accessToken: string,
+  athleteId: string
 ): Promise<IntervalsAthleteProfile | null> {
-  const { profile } = await fetchIntervalsAthleteProfileWithMeta(accessToken);
+  const { profile } = await fetchIntervalsAthleteProfileWithMeta(accessToken, athleteId);
   return profile;
 }

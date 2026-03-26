@@ -75,15 +75,19 @@ describe('intervals-api', () => {
 		vi.mocked(fetch).mockResolvedValue(
 			new Response(JSON.stringify({ id: 'a1', name: 'Test Rower' }), { status: 200 }) as Response,
 		);
-		const p = await fetchIntervalsAthleteProfile('tok');
+		const p = await fetchIntervalsAthleteProfile('tok', 'a1');
 		expect(p).toEqual({ id: 'a1', name: 'Test Rower' });
+		expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+			expect.stringContaining('/api/v1/athlete/a1'),
+			expect.objectContaining({ headers: { Authorization: 'Bearer tok' } }),
+		);
 	});
 
 	it('fetchIntervalsAthleteProfile accepts numeric id', async () => {
 		vi.mocked(fetch).mockResolvedValue(
 			new Response(JSON.stringify({ id: 9001, name: 'Num Id' }), { status: 200 }) as Response,
 		);
-		const p = await fetchIntervalsAthleteProfile('tok');
+		const p = await fetchIntervalsAthleteProfile('tok', 'x');
 		expect(p?.id).toBe('9001');
 		expect(p?.name).toBe('Num Id');
 	});
@@ -95,7 +99,7 @@ describe('intervals-api', () => {
 				{ status: 200 },
 			) as Response,
 		);
-		const p = await fetchIntervalsAthleteProfile('tok');
+		const p = await fetchIntervalsAthleteProfile('tok', 'n1');
 		expect(p?.id).toBe('n1');
 		expect(p?.name).toBe('A B');
 	});
@@ -107,7 +111,7 @@ describe('intervals-api', () => {
 				{ status: 200 },
 			) as Response,
 		);
-		const p = await fetchIntervalsAthleteProfile('tok');
+		const p = await fetchIntervalsAthleteProfile('tok', 'a2');
 		expect(p?.name).toBe('Ada Lovelace');
 		expect(p?.first_name).toBe('Ada');
 		expect(p?.last_name).toBe('Lovelace');
@@ -125,6 +129,11 @@ describe('intervals-api', () => {
 
 	it('fetchIntervalsAthleteProfile returns null on failure', async () => {
 		vi.mocked(fetch).mockResolvedValue(new Response('', { status: 401 }) as Response);
-		await expect(fetchIntervalsAthleteProfile('bad')).resolves.toBeNull();
+		await expect(fetchIntervalsAthleteProfile('bad', 'a1')).resolves.toBeNull();
+	});
+
+	it('fetchIntervalsAthleteProfile returns null when athleteId empty', async () => {
+		await expect(fetchIntervalsAthleteProfile('tok', '')).resolves.toBeNull();
+		expect(vi.mocked(fetch)).not.toHaveBeenCalled();
 	});
 });

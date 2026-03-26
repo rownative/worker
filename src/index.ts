@@ -264,7 +264,7 @@ export default {
         let intervalsMeta: IntervalsAthleteSelfMeta | undefined;
         let profileSummary: { id: string; hasName: boolean; hasFirst: boolean; hasLast: boolean } | null = null;
         if (session?.accessToken) {
-          const { profile, meta } = await fetchIntervalsAthleteProfileWithMeta(session.accessToken);
+          const { profile, meta } = await fetchIntervalsAthleteProfileWithMeta(session.accessToken, athleteId);
           intervalsMeta = meta;
           if (profile) {
             const fromParts = [profile.first_name, profile.last_name]
@@ -817,14 +817,43 @@ async function apiKeyForAthlete(athleteId: string, secret: string): Promise<stri
   return `${athleteId}.${mac}`;
 }
 
+/** If bearer is a JWT, try to read athlete id for /api/v1/athlete/{id} (self often 403 for OAuth). */
+function tryIntervalsJwtAthleteId(bearerToken: string): string | null {
+  const parts = bearerToken.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const pad = b64.length % 4 === 0 ? '' : '='.repeat(4 - (b64.length % 4));
+    const json = atob(b64 + pad);
+    const p = JSON.parse(json) as Record<string, unknown>;
+    for (const k of ['athleteId', 'athlete_id', 'sub']) {
+      const v = p[k];
+      if (typeof v === 'string' && v.trim()) return v.trim();
+      if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 async function verifyIntervalsToken(bearerToken: string): Promise<string | null> {
-  const res = await fetch('https://intervals.icu/api/v1/athlete/self', {
-    headers: { 'Authorization': `Bearer ${bearerToken}` },
-  });
-  if (!res.ok) return null;
-  const data = await res.json() as { id?: string | number };
-  if (data.id == null) return null;
-  return typeof data.id === 'number' && Number.isFinite(data.id) ? String(data.id) : String(data.id).trim() || null;
+  const urls: string[] = [];
+  const jwtId = tryIntervalsJwtAthleteId(bearerToken);
+  if (jwtId) {
+    urls.push(`https://intervals.icu/api/v1/athlete/${encodeURIComponent(jwtId)}`);
+  }
+  urls.push('https://intervals.icu/api/v1/athlete/self');
+  for (const url of urls) {
+    const res = await fetch(url, {
+      headers: { 'Authorization': `Bearer ${bearerToken}` },
+    });
+    if (!res.ok) continue;
+    const data = await res.json() as { id?: string | number };
+    if (data.id == null) continue;
+    return typeof data.id === 'number' && Number.isFinite(data.id) ? String(data.id) : String(data.id).trim() || null;
+  }
+  return null;
 }
 
 interface Session {
@@ -1719,7 +1748,7 @@ async function handleCreateChallenge(request: Request, athleteId: string, env: E
     const session = await getSessionFromRequest(request, env);
     let organizerName: string | null = null;
     if (session?.accessToken) {
-      const profile = await fetchIntervalsAthleteProfile(session.accessToken);
+      const profile = await fetchIntervalsAthleteProfile(session.accessToken, athleteId);
       organizerName = profile?.name?.trim() || null;
     }
     try {
@@ -2155,7 +2184,7 @@ async function handleChallengeSubmit(
   let intervalsMeta: IntervalsAthleteSelfMeta | undefined;
   let displayName: string | null = body.displayName?.trim() || null;
   if (!displayName) {
-    const { profile, meta } = await fetchIntervalsAthleteProfileWithMeta(session.accessToken);
+    const { profile, meta } = await fetchIntervalsAthleteProfileWithMeta(session.accessToken, athleteId);
     intervalsMeta = meta;
     if (profile) {
       const fromParts = [profile.first_name, profile.last_name]
@@ -2165,7 +2194,7 @@ async function handleChallengeSubmit(
       displayName = profile.name?.trim() || fromParts || null;
     }
   } else if (debugSubmit) {
-    const { meta } = await fetchIntervalsAthleteProfileWithMeta(session.accessToken);
+    const { meta } = await fetchIntervalsAthleteProfileWithMeta(session.accessToken, athleteId);
     intervalsMeta = meta;
   }
   if (displayName) {
