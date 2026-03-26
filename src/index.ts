@@ -1,5 +1,5 @@
 import { unzipSync } from 'fflate';
-import { kmlToCourse, haversine } from './kml-to-course';
+import { kmlToCourse, haversine, type CourseFromKml } from './kml-to-course';
 import { calculateCourseTime, type TrackPoint } from './course-time';
 import { computeHandicap } from './handicap';
 import {
@@ -2179,7 +2179,7 @@ type OpenCoursePRResult = { ok: true; prUrl: string } | { ok: false; error: stri
 
 async function openCoursePR(
   env: Env,
-  courseJson: { id: string; [k: string]: unknown },
+  courseJson: CourseFromKml,
   kmlContent: string,
   source: 'rowsandall' | 'web' = 'rowsandall'
 ): Promise<OpenCoursePRResult> {
