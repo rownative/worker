@@ -62,6 +62,14 @@ function safeLocalReturnTo(raw: string | null): string | null {
   }
 }
 
+/** intervals.icu redirect_uri for local dev — must match this worker's origin (wrangler may use 8788 if 8787 is taken). */
+function oauthRedirectUri(request: Request, isLocal: boolean): string {
+  if (!isLocal) return 'https://rownative.icu/oauth/callback';
+  const u = new URL(request.url);
+  if (!isLocalHostname(u.hostname)) return 'http://localhost:8787/oauth/callback';
+  return `${u.origin}/oauth/callback`;
+}
+
 function hostnameFromHostHeader(host: string): string | null {
   if (!host) return null;
   try {
@@ -288,9 +296,7 @@ export default {
       const isLocalByHost = hostName !== null && isLocalHostname(hostName);
       const isLocalByUrl = isLocalHostname(url.hostname);
       const isLocal = localParam || isLocalByHost || isLocalByUrl;
-      const redirectUri = isLocal
-        ? 'http://localhost:8787/oauth/callback'
-        : 'https://rownative.icu/oauth/callback';
+      const redirectUri = oauthRedirectUri(request, isLocal);
       return new Response(
         JSON.stringify({
           redirect_uri: redirectUri,
@@ -318,7 +324,7 @@ export default {
       const isLocal = localParam
         || (hostName !== null && isLocalHostname(hostName))
         || isLocalHostname(url.hostname);
-      const redirectUri = isLocal ? 'http://localhost:8787/oauth/callback' : 'https://rownative.icu/oauth/callback';
+      const redirectUri = oauthRedirectUri(request, isLocal);
       const state = crypto.randomUUID();
       const returnToParam = url.searchParams.get('return_to');
       const safeReturn = safeLocalReturnTo(returnToParam);
@@ -367,7 +373,7 @@ export default {
       const returnToRaw = (typeof kvVal === 'string' && kvVal.startsWith('local:')) ? kvVal.slice(6) : null;
       const returnTo = safeLocalReturnTo(returnToRaw);
 
-      const redirectUri = isLocal ? 'http://localhost:8787/oauth/callback' : 'https://rownative.icu/oauth/callback';
+      const redirectUri = oauthRedirectUri(request, isLocal);
 
       const missingOAuthCb = missingIntervalsOAuthEnv(env);
       if (missingOAuthCb) {
