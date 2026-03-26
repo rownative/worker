@@ -6,9 +6,11 @@ import {
   fetchIntervalsActivities,
   fetchIntervalsActivity,
   fetchIntervalsAthleteProfile,
+  fetchIntervalsAthleteProfileWithMeta,
   fetchIntervalsStreams,
   isOtwRowing,
   type IntervalsActivity,
+  type IntervalsAthleteSelfMeta,
 } from './intervals-api';
 import { isNameAllowed } from './content-filter';
 
@@ -246,28 +248,54 @@ export default {
 
     // GET /api/me — 200 with null when unauthenticated (avoids console noise)
     if (path === '/api/me' || path === '/api/me/') {
+      const meUrl = new URL(request.url);
+      const debugMe = meUrl.searchParams.get('debug') === '1';
       const athleteId = await getAthleteIdFromRequest(request, env);
-      let payload: { athleteId: string | null; liked: string[]; isOrganizer?: boolean; athleteDisplayName?: string };
+      let payload: {
+        athleteId: string | null;
+        liked: string[];
+        isOrganizer?: boolean;
+        athleteDisplayName?: string;
+        _debug?: { intervalsAthleteSelf: IntervalsAthleteSelfMeta; profile?: { id: string; hasName: boolean; hasFirst: boolean; hasLast: boolean } | null };
+      };
       if (athleteId) {
         const session = await getSessionFromRequest(request, env);
         let athleteDisplayName: string | undefined;
+        let intervalsMeta: IntervalsAthleteSelfMeta | undefined;
+        let profileSummary: { id: string; hasName: boolean; hasFirst: boolean; hasLast: boolean } | null = null;
         if (session?.accessToken) {
-          const profile = await fetchIntervalsAthleteProfile(session.accessToken);
+          const { profile, meta } = await fetchIntervalsAthleteProfileWithMeta(session.accessToken);
+          intervalsMeta = meta;
           if (profile) {
             const fromParts = [profile.first_name, profile.last_name]
               .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
               .map((s) => s.trim())
               .join(' ');
             athleteDisplayName = profile.name?.trim() || fromParts || undefined;
+            profileSummary = {
+              id: profile.id,
+              hasName: !!profile.name?.trim(),
+              hasFirst: !!profile.first_name?.trim(),
+              hasLast: !!profile.last_name?.trim(),
+            };
           }
         }
         const [liked, isOrg] = await Promise.all([
           env.ROWING_COURSES.get(`liked:${athleteId}`).then((v) => JSON.parse(v ?? '[]') as string[]),
           isOrganizer(athleteId, env, request),
         ]);
-        payload = { athleteId, liked, isOrganizer: isOrg, athleteDisplayName };
+        // Always include athleteDisplayName (null if unresolved) — JSON.stringify omits undefined keys.
+        payload = {
+          athleteId,
+          liked,
+          isOrganizer: isOrg,
+          athleteDisplayName: athleteDisplayName ?? null,
+        };
+        if (debugMe && intervalsMeta) {
+          payload._debug = { intervalsAthleteSelf: intervalsMeta, profile: profileSummary };
+        }
       } else {
-        payload = { athleteId: null, liked: [], isOrganizer: false };
+        payload = { athleteId: null, liked: [], isOrganizer: false, athleteDisplayName: null };
       }
       const allowOrigin = corsAllowOrigin(request);
       return new Response(JSON.stringify(payload), {
@@ -2032,6 +2060,8 @@ async function handleChallengeSubmit(
   athleteId: string,
   env: Env
 ): Promise<Response> {
+  const submitUrl = new URL(request.url);
+  const debugSubmit = submitUrl.searchParams.get('debug') === '1';
   if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
   const removed = await getRemovedChallengeIds(env);
   if (removed.has(challengeId)) return jsonResponse({ error: 'Not found' }, 404, true);
@@ -2122,9 +2152,11 @@ async function handleChallengeSubmit(
     }, 400, true);
   }
 
+  let intervalsMeta: IntervalsAthleteSelfMeta | undefined;
   let displayName: string | null = body.displayName?.trim() || null;
   if (!displayName) {
-    const profile = await fetchIntervalsAthleteProfile(session.accessToken);
+    const { profile, meta } = await fetchIntervalsAthleteProfileWithMeta(session.accessToken);
+    intervalsMeta = meta;
     if (profile) {
       const fromParts = [profile.first_name, profile.last_name]
         .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
@@ -2132,11 +2164,22 @@ async function handleChallengeSubmit(
         .join(' ');
       displayName = profile.name?.trim() || fromParts || null;
     }
+  } else if (debugSubmit) {
+    const { meta } = await fetchIntervalsAthleteProfileWithMeta(session.accessToken);
+    intervalsMeta = meta;
   }
   if (displayName) {
     const displayCheck = isNameAllowed(displayName);
     if (!displayCheck.allowed) {
-      return jsonResponse({ error: displayCheck.reason ?? "That name isn't allowed." }, 400, true);
+      return jsonResponse({
+        error: displayCheck.reason ?? "That name isn't allowed.",
+        ...(debugSubmit ? {
+          _debug: {
+            intervalsAthleteSelf: intervalsMeta,
+            displayNameRejected: displayName,
+          },
+        } : {}),
+      }, 400, true);
     }
   }
   const boatType = body.boatType ? String(body.boatType).trim() || null : null;
@@ -2269,6 +2312,16 @@ async function handleChallengeSubmit(
     points,
     validationNote,
     replaced,
+    ...(debugSubmit ? {
+      _debug: {
+        displayNameStored: displayName,
+        displayNameFromBody: body.displayName?.trim() || null,
+        intervalsAthleteSelf: intervalsMeta,
+        athleteId,
+        challengeId,
+        categoryKey,
+      },
+    } : {}),
   }, 200, true);
 }
 

@@ -184,6 +184,80 @@ export function displayNameFromAthletePayload(data: Record<string, unknown>): st
   return joined || undefined;
 }
 
+/** Metadata from GET /api/v1/athlete/self (for debug=1 troubleshooting). */
+export interface IntervalsAthleteSelfMeta {
+  httpStatus: number;
+  ok: boolean;
+  topLevelKeys: string[];
+  usedNestedAthlete: boolean;
+  parseError?: string;
+}
+
+/**
+ * Same as fetchIntervalsAthleteProfile plus response metadata (single HTTP request).
+ */
+export async function fetchIntervalsAthleteProfileWithMeta(
+  accessToken: string
+): Promise<{ profile: IntervalsAthleteProfile | null; meta: IntervalsAthleteSelfMeta }> {
+  const res = await fetch(`${INTERVALS_BASE}/api/v1/athlete/self`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const text = await res.text();
+  let raw: unknown;
+  try {
+    raw = text ? JSON.parse(text) : null;
+  } catch (e) {
+    const meta: IntervalsAthleteSelfMeta = {
+      httpStatus: res.status,
+      ok: res.ok,
+      topLevelKeys: [],
+      usedNestedAthlete: false,
+      parseError: e instanceof Error ? e.message : 'json parse error',
+    };
+    return { profile: null, meta };
+  }
+  const topLevelKeys =
+    raw && typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+      ? Object.keys(raw as object)
+      : [];
+  const usedNestedAthlete =
+    !!raw &&
+    typeof raw === 'object' &&
+    raw !== null &&
+    'athlete' in (raw as object) &&
+    typeof (raw as { athlete?: unknown }).athlete === 'object' &&
+    (raw as { athlete?: unknown }).athlete !== null;
+  const meta: IntervalsAthleteSelfMeta = {
+    httpStatus: res.status,
+    ok: res.ok,
+    topLevelKeys,
+    usedNestedAthlete,
+  };
+  if (!res.ok || raw == null) {
+    return { profile: null, meta };
+  }
+  const data = flattenAthleteJson(raw);
+  if (!data) {
+    return { profile: null, meta };
+  }
+  const id = athleteIdFromPayload(data);
+  if (!id) {
+    return { profile: null, meta };
+  }
+  const name = displayNameFromAthletePayload(data);
+  const first_name = pickString(data, ['first_name', 'firstName', 'givenName']);
+  const last_name = pickString(data, ['last_name', 'lastName', 'familyName']);
+  return {
+    profile: {
+      id,
+      name,
+      first_name,
+      last_name,
+    },
+    meta,
+  };
+}
+
 /**
  * Fetch athlete profile from intervals.icu (for display name in challenge submission).
  * Requires OAuth access token. Returns null on failure.
@@ -191,22 +265,6 @@ export function displayNameFromAthletePayload(data: Record<string, unknown>): st
 export async function fetchIntervalsAthleteProfile(
   accessToken: string
 ): Promise<IntervalsAthleteProfile | null> {
-  const res = await fetch(`${INTERVALS_BASE}/api/v1/athlete/self`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  if (!res.ok) return null;
-  const raw = await res.json();
-  const data = flattenAthleteJson(raw);
-  if (!data) return null;
-  const id = athleteIdFromPayload(data);
-  if (!id) return null;
-  const name = displayNameFromAthletePayload(data);
-  const first_name = pickString(data, ['first_name', 'firstName', 'givenName']);
-  const last_name = pickString(data, ['last_name', 'lastName', 'familyName']);
-  return {
-    id,
-    name,
-    first_name,
-    last_name,
-  };
+  const { profile } = await fetchIntervalsAthleteProfileWithMeta(accessToken);
+  return profile;
 }
