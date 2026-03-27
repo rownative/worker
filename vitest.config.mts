@@ -12,6 +12,7 @@ export default defineWorkersConfig({
 				'src/kml-to-course.ts': { lines: 75 },
 				'src/course-time.ts': { lines: 75 },
 				'src/content-filter.ts': { lines: 75 },
+				'src/handicap.ts': { lines: 95 },
 			},
 		},
 		poolOptions: {
