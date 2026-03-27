@@ -558,7 +558,7 @@ export default {
       const courseId = saveMatch[1];
       const athleteId = await getAthleteIdFromRequest(request, env);
       if (!athleteId) return jsonResponse({ error: 'Unauthorised' }, 401, true, request);
-      return withCors(await handleSaveCourseTime(request, courseId, athleteId, env), request);
+      return withCors(await handleSaveCourseTime(request, courseId, athleteId, env, ctx), request);
     }
 
     // GET /api/me/course-times
@@ -765,26 +765,13 @@ async function isOrganizer(athleteId: string, env: Env, request?: Request): Prom
   return ids.has(athleteId);
 }
 
-/** Create a GitHub issue to notify admins of a new challenge. Fire-and-forget; failures are ignored. */
-async function notifyAdminsNewChallenge(
-  env: Env,
-  challenge: { id: string; name: string; courseId: string; rowStart: string; rowEnd: string; submitEnd: string; athleteId: string }
-): Promise<void> {
+/** Shared helper: open a GitHub issue in GITHUB_REPO. Fire-and-forget callers use waitUntil. */
+async function postGithubIssue(env: Env, title: string, body: string): Promise<void> {
   const token = env.GITHUB_TOKEN;
   if (!token) return;
   const repo = env.GITHUB_REPO ?? 'rownative/courses';
   const [owner, repoName] = repo.split('/');
   if (!owner || !repoName) return;
-
-  const viewUrl = `https://rownative.icu/challenge.html?id=${encodeURIComponent(challenge.id)}`;
-  const title = `New challenge: ${challenge.name}`;
-  const body = `Challenge created by organiser (athlete ID: ${challenge.athleteId}).
-
-- **Name:** ${challenge.name}
-- **Course:** ${challenge.courseId}
-- **Row window:** ${challenge.rowStart} – ${challenge.rowEnd}
-- **Submit deadline:** ${challenge.submitEnd}
-- **View:** ${viewUrl}`;
 
   try {
     const res = await fetch(`${GITHUB_API}/repos/${owner}/${repoName}/issues`, {
@@ -799,11 +786,65 @@ async function notifyAdminsNewChallenge(
       body: JSON.stringify({ title, body }),
     });
     if (!res.ok) {
-      console.error('[notifyAdminsNewChallenge] GitHub API error:', res.status, await res.text());
+      console.error('[postGithubIssue] GitHub API error:', res.status, await res.text());
     }
   } catch (e) {
-    console.error('[notifyAdminsNewChallenge] Failed:', e);
+    console.error('[postGithubIssue] Failed:', e);
   }
+}
+
+const ESTABLISHED_STATUS_PROMPT = `Please consider updating the course JSON in this repo to set \`status\` to \`established\` once the geometry is considered validated.`;
+
+/** Create a GitHub issue to notify admins of a new challenge. Fire-and-forget; failures are ignored. */
+async function notifyAdminsNewChallenge(
+  env: Env,
+  challenge: {
+    id: string;
+    name: string;
+    courseId: string;
+    rowStart: string;
+    rowEnd: string;
+    submitEnd: string;
+    athleteId: string;
+    courseIsProvisional?: boolean;
+  }
+): Promise<void> {
+  const viewUrl = `https://rownative.icu/challenge.html?id=${encodeURIComponent(challenge.id)}`;
+  const title = `New challenge: ${challenge.name}`;
+  let body = `Challenge created by organiser (athlete ID: ${challenge.athleteId}).
+
+- **Name:** ${challenge.name}
+- **Course:** ${challenge.courseId}
+- **Row window:** ${challenge.rowStart} – ${challenge.rowEnd}
+- **Submit deadline:** ${challenge.submitEnd}
+- **View:** ${viewUrl}`;
+
+  if (challenge.courseIsProvisional) {
+    body += `
+
+---
+
+### Provisional course
+This challenge uses course **${challenge.courseId}**, which is still **provisional** in \`courses/index.json\`. ${ESTABLISHED_STATUS_PROMPT}`;
+  }
+
+  await postGithubIssue(env, title, body);
+}
+
+/** First saved measured time for a provisional course (any athlete). */
+async function notifyAdminsProvisionalCourseFirstMeasuredTime(
+  env: Env,
+  payload: { courseId: string; courseName: string; athleteId: string }
+): Promise<void> {
+  const mapUrl = `https://rownative.icu/index.html#course-${encodeURIComponent(payload.courseId)}`;
+  const title = `Provisional course ${payload.courseId}: first measured time saved`;
+  const body = `A measured time was saved for provisional course **${payload.courseName}** (\`${payload.courseId}\`). This is the **first** saved time for this course in the database (saved by athlete ID ${payload.athleteId}).
+
+${ESTABLISHED_STATUS_PROMPT}
+
+- **Map:** ${mapUrl}`;
+
+  await postGithubIssue(env, title, body);
 }
 
 /** Get session from cookie (browser auth). Returns null for API key. */
@@ -1420,7 +1461,8 @@ async function handleSaveCourseTime(
   request: Request,
   courseId: string,
   athleteId: string,
-  env: Env
+  env: Env,
+  ctx?: ExecutionContext
 ): Promise<Response> {
   if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
   let body: { activityId: string; timeS: number; distanceM: number; validationNote?: string; workoutDate?: string; workoutName?: string };
@@ -1444,6 +1486,21 @@ async function handleSaveCourseTime(
   const createdAt = new Date().toISOString();
   const wd = workoutDate && /^\d{4}-\d{2}-\d{2}/.test(workoutDate) ? workoutDate.slice(0, 10) : null;
   const wn = (workoutName && String(workoutName).trim()) || null;
+
+  let priorCount = 0;
+  try {
+    const row = await env.DB.prepare('SELECT COUNT(*) as n FROM course_times WHERE course_id = ?')
+      .bind(courseId)
+      .first<{ n: number }>();
+    priorCount = row?.n != null ? Number(row.n) : 0;
+  } catch {
+    priorCount = 0;
+  }
+
+  const courses = await getCourseIndex(env);
+  const status = courseStatusById(courses, courseId);
+  const notifyFirstMeasured = priorCount === 0 && status === 'provisional';
+
   try {
     await env.DB.prepare(
       `INSERT INTO course_times (id, athlete_id, activity_id, course_id, time_s, distance_m, validation_note, created_at, workout_date, workout_name)
@@ -1462,6 +1519,12 @@ async function handleSaveCourseTime(
     const msg = e instanceof Error ? e.message : 'Database error';
     return jsonResponse({ error: msg }, 500, true);
   }
+
+  if (ctx && notifyFirstMeasured) {
+    const courseName = courseNameById(courses, courseId);
+    ctx.waitUntil(notifyAdminsProvisionalCourseFirstMeasuredTime(env, { courseId, courseName, athleteId }));
+  }
+
   return jsonResponse({ saved: true }, 200, true);
 }
 
@@ -1580,6 +1643,13 @@ async function getCourseIndex(env: Env): Promise<Array<{ id: string; name?: stri
 function courseNameById(courses: Array<{ id: string; name?: string }>, id: string): string {
   const c = courses.find((x) => String(x.id) === String(id));
   return c?.name ?? `Course ${id}`;
+}
+
+function courseStatusById(courses: Array<{ id: string; status?: string }>, id: string): 'provisional' | 'established' | null {
+  const c = courses.find((x) => String(x.id) === String(id));
+  const s = c?.status;
+  if (s === 'provisional' || s === 'established') return s;
+  return null;
 }
 
 /** Course index row (GitHub `courses/index.json`) — used for map preview and distance on challenge cards. */
@@ -1827,7 +1897,19 @@ async function handleCreateChallenge(request: Request, athleteId: string, env: E
     );
 
     if (ctx) {
-      ctx.waitUntil(notifyAdminsNewChallenge(env, { id, name, courseId, rowStart, rowEnd, submitEnd, athleteId }));
+      const courseIsProvisional = courseStatusById(courses, courseId) === 'provisional';
+      ctx.waitUntil(
+        notifyAdminsNewChallenge(env, {
+          id,
+          name,
+          courseId,
+          rowStart,
+          rowEnd,
+          submitEnd,
+          athleteId,
+          courseIsProvisional,
+        })
+      );
     }
 
     return jsonResponse({ id, challenge }, 200, true, request);
