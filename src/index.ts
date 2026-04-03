@@ -2344,9 +2344,11 @@ async function handleChallengeSubmit(
   if (hasHandicap && (!boatType || !sex)) {
     return jsonResponse({ error: 'boatType and sex required for handicap challenges' }, 400, true);
   }
-  let categoryKey = hasHandicap
-    ? (boatType || '') + '|' + (sex || '') + '|' + (weightClass || '')
-    : 'raw';
+  
+  // Category key: boat|display_name|sex|weight for unique result per athlete per category
+  // Includes boat_type and display_name even for non-handicap challenges so different crews/boats don't overwrite each other
+  const normalizedDisplayName = (displayName || '').trim().toLowerCase();
+  let categoryKey = (boatType || '') + '|' + normalizedDisplayName + '|' + (sex || '') + '|' + (weightClass || '');
   let correctedTimeS = result.timeS;
   let points: number | null = null;
   if (collectionId && boatType && sex) {
@@ -2371,7 +2373,7 @@ async function handleChallengeSubmit(
       correctedTimeS = handicap.correctedTimeS;
       points = handicap.points;
       if (handicap.ageBand) {
-        categoryKey = (boatType || '') + '|' + (sex || '') + '|' + (weightClass || '') + '|' + handicap.ageBand;
+        categoryKey = (boatType || '') + '|' + normalizedDisplayName + '|' + (sex || '') + '|' + (weightClass || '') + '|' + handicap.ageBand;
       }
     }
   }
