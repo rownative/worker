@@ -28,8 +28,14 @@
 		}
 	],
 	"routes": [
-		{ "pattern": "rownative.icu/api/*", "zone_name": "rownative.icu" },
-		{ "pattern": "rownative.icu/oauth/*", "zone_name": "rownative.icu" }
+		{
+			"pattern": "rownative.icu/api/*",
+			"zone_name": "rownative.icu"
+		},
+		{
+			"pattern": "rownative.icu/oauth/*",
+			"zone_name": "rownative.icu"
+		}
 	],
 	/**
 	 * Default bindings so `env.INTERVALS_*` is never undefined (avoids client_id=undefined in OAuth URLs).
@@ -37,9 +43,9 @@
 	 * Local real OAuth: use `.dev.vars` with real intervals.icu credentials (overrides these defaults).
 	 */
 	"vars": {
-		"INTERVALS_CLIENT_ID": "configure-via-secret-or-dev-vars",
-		"INTERVALS_CLIENT_SECRET": "configure-via-secret-or-dev-vars",
-		"TOKEN_ENCRYPTION_KEY": "00000000000000000000000000000000"
+		"INTERVALS_CLIENT_ID": "262",
+		"INTERVALS_CLIENT_SECRET": "18b3505ea654470eb2bf5f19e189de8a",
+		"TOKEN_ENCRYPTION_KEY": "803747af0799439e82cb8e68a84716ade77f401522e692f0c1aa011e84579b17"
 	}
 	/**
 	 * Smart Placement
