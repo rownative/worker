@@ -1788,6 +1788,7 @@ async function handleChallengeDetail(challengeId: string, env: Env): Promise<Res
 
 async function handleOrganiserChallengesList(athleteId: string, env: Env): Promise<Response> {
   if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+  const removed = await getRemovedChallengeIds(env);
   try {
     const r = await env.DB.prepare(
       `SELECT c.*, (SELECT COUNT(*) FROM challenge_results cr WHERE cr.challenge_id = c.id AND cr.validation_status IN ('valid', 'manual_ok')) as results_count
@@ -1800,7 +1801,8 @@ async function handleOrganiserChallengesList(athleteId: string, env: Env): Promi
     const rows = (r.results ?? []) as Record<string, unknown>[];
     const courses = await getCourseIndex(env);
     const customColls = await loadCollectionNames(env);
-    const api = rows.map((row) => challengeToApi(row, courses, customColls));
+    const filtered = rows.filter((row) => !removed.has(String(row.id ?? '')));
+    const api = filtered.map((row) => challengeToApi(row, courses, customColls));
     return jsonResponse({ challenges: api }, 200, true);
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Database error';
@@ -2316,6 +2318,11 @@ async function addToRemovedChallenges(
     if (!putRes.ok) {
       throw new Error(`Failed to update removed-challenges.json: ${putRes.status}`);
     }
+
+    const updatedIds = existingData.map((x) => x.id);
+    await env.ROWING_COURSES.put(REMOVED_CHALLENGES_CACHE_KEY, JSON.stringify(updatedIds), {
+      expirationTtl: REMOVED_CHALLENGES_CACHE_TTL,
+    });
 
     return issue.html_url;
   } catch (e) {
