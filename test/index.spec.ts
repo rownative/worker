@@ -339,6 +339,13 @@ describe('Rowing Courses Worker', () => {
 			});
 			expect(response.status).toBe(401);
 		});
+
+		it('DELETE /api/organiser/challenges/:id returns 401 when not authenticated', async () => {
+			const response = await fetchAndWait('https://rownative.icu/api/organiser/challenges/test-challenge-id', {
+				method: 'DELETE',
+			});
+			expect(response.status).toBe(401);
+		});
 	});
 
 	describe('Auth, KML liked, follow', () => {

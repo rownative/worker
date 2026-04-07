@@ -664,6 +664,14 @@ export default {
       return withCors(await handleOrganiserResultTrack(organiserTrackMatch[1], athleteId, env), request);
     }
 
+    // DELETE /api/organiser/challenges/:id — remove challenge (handler checks organizer_id)
+    const organiserDeleteMatch = path.match(/^\/api\/organiser\/challenges\/([^/]+)\/?$/);
+    if (organiserDeleteMatch && request.method === 'DELETE') {
+      const athleteId = await getAthleteIdFromRequest(request, env);
+      if (!athleteId) return withCors(jsonResponse({ error: 'Unauthorised' }, 401, true), request);
+      return withCors(await handleDeleteChallenge(request, organiserDeleteMatch[1], athleteId, env), request);
+    }
+
     return new Response('Not found', { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
@@ -2150,6 +2158,170 @@ async function handleOrganiserResultTrack(
   if (!Array.isArray(latlng) || latlng.length < 2) return jsonResponse({ error: 'No GPS track stored' }, 400, true);
 
   return jsonResponse({ latlng }, 200, true);
+}
+
+async function handleDeleteChallenge(
+  request: Request,
+  challengeId: string,
+  athleteId: string,
+  env: Env
+): Promise<Response> {
+  if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
+
+  const chRow = await env.DB.prepare('SELECT organizer_id, name FROM challenges WHERE id = ?')
+    .bind(challengeId)
+    .first();
+  if (!chRow) return jsonResponse({ error: 'Challenge not found' }, 404, true);
+  const challenge = chRow as { organizer_id: string; name: string };
+  if (challenge.organizer_id !== athleteId) {
+    return jsonResponse({ error: 'Not your challenge' }, 403, true);
+  }
+
+  const url = new URL(request.url);
+  const mergeInto = url.searchParams.get('mergeInto');
+
+  if (mergeInto) {
+    const targetRow = await env.DB.prepare('SELECT organizer_id, name FROM challenges WHERE id = ?')
+      .bind(mergeInto)
+      .first();
+    if (!targetRow) return jsonResponse({ error: 'Target challenge not found' }, 404, true);
+    const target = targetRow as { organizer_id: string; name: string };
+    if (target.organizer_id !== athleteId) {
+      return jsonResponse({ error: 'Target challenge not yours' }, 403, true);
+    }
+
+    const resultsRow = await env.DB.prepare('SELECT COUNT(*) as count FROM challenge_results WHERE challenge_id = ?')
+      .bind(challengeId)
+      .first();
+    const resultsCount = resultsRow ? Number((resultsRow as { count: number }).count) : 0;
+
+    if (resultsCount > 0) {
+      try {
+        await env.DB.prepare(`
+          INSERT INTO challenge_results (
+            id, challenge_id, athlete_id, activity_id, display_name, 
+            raw_time_s, corrected_time_s, points, category_key, 
+            boat_type, sex, weight_class, crew_avg_age, 
+            start_time, validation_status, validation_note, 
+            validation_log, track_latlng, submitted_at
+          )
+          SELECT 
+            id, ?, athlete_id, activity_id, display_name,
+            raw_time_s, corrected_time_s, points, 
+            REPLACE(category_key, ?, ?) as category_key,
+            boat_type, sex, weight_class, crew_avg_age,
+            start_time, validation_status, validation_note,
+            validation_log, track_latlng, submitted_at
+          FROM challenge_results
+          WHERE challenge_id = ?
+          ON CONFLICT(challenge_id, athlete_id, category_key) DO UPDATE SET
+            raw_time_s = CASE WHEN excluded.raw_time_s < challenge_results.raw_time_s THEN excluded.raw_time_s ELSE challenge_results.raw_time_s END,
+            corrected_time_s = CASE WHEN excluded.corrected_time_s < challenge_results.corrected_time_s THEN excluded.corrected_time_s ELSE challenge_results.corrected_time_s END,
+            activity_id = CASE WHEN excluded.raw_time_s < challenge_results.raw_time_s THEN excluded.activity_id ELSE challenge_results.activity_id END,
+            start_time = CASE WHEN excluded.raw_time_s < challenge_results.raw_time_s THEN excluded.start_time ELSE challenge_results.start_time END,
+            submitted_at = CASE WHEN excluded.raw_time_s < challenge_results.raw_time_s THEN excluded.submitted_at ELSE challenge_results.submitted_at END,
+            track_latlng = CASE WHEN excluded.raw_time_s < challenge_results.raw_time_s THEN excluded.track_latlng ELSE challenge_results.track_latlng END,
+            validation_log = CASE WHEN excluded.raw_time_s < challenge_results.raw_time_s THEN excluded.validation_log ELSE challenge_results.validation_log END
+        `).bind(mergeInto, challengeId, mergeInto, challengeId).run();
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : 'Database error during merge';
+        return jsonResponse({ error: msg }, 500, true);
+      }
+    }
+  }
+
+  const removedIssue = await addToRemovedChallenges(env, challengeId, athleteId, challenge.name, mergeInto);
+
+  return jsonResponse({
+    success: true,
+    challengeId,
+    mergedInto: mergeInto || null,
+    issue: removedIssue,
+  }, 200, true);
+}
+
+async function addToRemovedChallenges(
+  env: Env,
+  challengeId: string,
+  organizerId: string,
+  challengeName: string,
+  mergedInto?: string | null
+): Promise<string | null> {
+  if (!env.GITHUB_TOKEN || !env.GITHUB_REPO) return null;
+
+  try {
+    const repo = env.GITHUB_REPO;
+    const [owner, repoName] = repo.split('/');
+    const path = 'removed-challenges.json';
+    const headers = {
+      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+      Accept: 'application/vnd.github.v3+json',
+      'User-Agent': 'Cloudflare-Worker',
+    };
+
+    const getRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/contents/${path}`, { headers });
+    let sha: string | null = null;
+    let existingData: Array<{ id: string; removedBy: string; removedAt: string; reason?: string }> = [];
+
+    if (getRes.ok) {
+      const json = (await getRes.json()) as { content: string; sha: string };
+      sha = json.sha;
+      const content = atob(json.content.replace(/\s/g, ''));
+      existingData = JSON.parse(content);
+    }
+
+    existingData.push({
+      id: challengeId,
+      removedBy: organizerId,
+      removedAt: new Date().toISOString(),
+      reason: mergedInto ? `Merged into ${mergedInto}` : 'Removed by organizer',
+    });
+
+    const newContent = JSON.stringify(existingData, null, 2);
+    const encoded = btoa(unescape(encodeURIComponent(newContent)));
+
+    const reason = mergedInto ? `Merged duplicate challenge into ${mergedInto}` : 'Removed duplicate/incorrect challenge';
+    const issueTitle = `Challenge removed: ${challengeName}`;
+    const issueBody = `Challenge ID: ${challengeId}\nOrganizer: ${organizerId}\nReason: ${reason}`;
+
+    const issueRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/issues`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        title: issueTitle,
+        body: issueBody,
+        labels: ['challenge-removal'],
+      }),
+    });
+
+    if (!issueRes.ok) {
+      throw new Error(`Failed to create issue: ${issueRes.status}`);
+    }
+
+    const issue = (await issueRes.json()) as { number: number; html_url: string };
+
+    const commitMessage = `Remove challenge ${challengeId}${mergedInto ? ` (merged into ${mergedInto})` : ''}\n\nSee issue #${issue.number}`;
+
+    const putRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/contents/${path}`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({
+        message: commitMessage,
+        content: encoded,
+        sha,
+        branch: 'main',
+      }),
+    });
+
+    if (!putRes.ok) {
+      throw new Error(`Failed to update removed-challenges.json: ${putRes.status}`);
+    }
+
+    return issue.html_url;
+  } catch (e) {
+    console.error('Failed to update removed-challenges.json:', e);
+    return null;
+  }
 }
 
 async function handleChallengeResults(challengeId: string, env: Env): Promise<Response> {
