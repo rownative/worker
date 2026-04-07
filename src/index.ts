@@ -1614,7 +1614,12 @@ async function getRemovedChallengeIds(env: Env): Promise<Set<string>> {
   if (!res.ok) return new Set();
   try {
     const arr = (await res.json()) as unknown;
-    const ids = Array.isArray(arr) ? arr.map(String) : [];
+    if (!Array.isArray(arr)) return new Set();
+    const ids = arr.map((item) => {
+      if (typeof item === 'string') return item;
+      if (item && typeof item === 'object' && 'id' in item) return String(item.id);
+      return String(item);
+    });
     await env.ROWING_COURSES.put(REMOVED_CHALLENGES_CACHE_KEY, JSON.stringify(ids), {
       expirationTtl: REMOVED_CHALLENGES_CACHE_TTL,
     });
@@ -2254,7 +2259,7 @@ async function addToRemovedChallenges(
   try {
     const repo = env.GITHUB_REPO;
     const [owner, repoName] = repo.split('/');
-    const path = 'removed-challenges.json';
+    const path = 'courses/removed-challenges.json';
     const headers = {
       Authorization: `Bearer ${env.GITHUB_TOKEN}`,
       Accept: 'application/vnd.github.v3+json',
