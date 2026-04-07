@@ -1732,7 +1732,7 @@ async function handleListChallenges(status: string, env: Env): Promise<Response>
     const r = await env.DB.prepare(
       `SELECT c.*, (SELECT COUNT(*) FROM challenge_results cr WHERE cr.challenge_id = c.id AND cr.validation_status IN ('valid', 'manual_ok')) as results_count
        FROM challenges c
-       WHERE c.is_public = 1
+       WHERE c.is_public = 1 AND c.is_deleted = 0
        ORDER BY c.row_start DESC`
     )
       .all();
@@ -1775,7 +1775,7 @@ async function handleChallengeDetail(challengeId: string, env: Env): Promise<Res
   if (removed.has(challengeId)) return jsonResponse({ error: 'Not found' }, 404, true);
   try {
     const r = await env.DB.prepare(
-      'SELECT * FROM challenges WHERE id = ? AND is_public = 1'
+      'SELECT * FROM challenges WHERE id = ? AND is_public = 1 AND (is_deleted = 0 OR is_deleted IS NULL)'
     )
       .bind(challengeId)
       .first();
@@ -1798,7 +1798,7 @@ async function handleOrganiserChallengesList(athleteId: string, env: Env): Promi
     const r = await env.DB.prepare(
       `SELECT c.*, (SELECT COUNT(*) FROM challenge_results cr WHERE cr.challenge_id = c.id AND cr.validation_status IN ('valid', 'manual_ok')) as results_count
        FROM challenges c
-       WHERE c.organizer_id = ?
+       WHERE c.organizer_id = ? AND c.is_deleted = 0
        ORDER BY c.created_at DESC`
     )
       .bind(athleteId)
@@ -2237,6 +2237,15 @@ async function handleDeleteChallenge(
     }
   }
 
+  try {
+    await env.DB.prepare('UPDATE challenges SET is_deleted = 1 WHERE id = ?')
+      .bind(challengeId)
+      .run();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Database error marking challenge as deleted';
+    return jsonResponse({ error: msg }, 500, true);
+  }
+
   const removedIssue = await addToRemovedChallenges(env, challengeId, athleteId, challenge.name, mergeInto);
 
   return jsonResponse({
@@ -2340,7 +2349,16 @@ async function handleChallengeResults(challengeId: string, env: Env): Promise<Re
   if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, true);
   const removed = await getRemovedChallengeIds(env);
   if (removed.has(challengeId)) return jsonResponse({ error: 'Not found' }, 404, true);
-  const chRow = await env.DB.prepare('SELECT collection_id FROM challenges WHERE id = ?').bind(challengeId).first();
+  let chRow = null;
+  try {
+    chRow = await env.DB.prepare('SELECT collection_id, is_deleted FROM challenges WHERE id = ?').bind(challengeId).first();
+    if (chRow && (chRow as { is_deleted?: number }).is_deleted === 1) {
+      return jsonResponse({ error: 'Not found' }, 404, true);
+    }
+  } catch {
+    // Column may not exist in test DB, fetch without is_deleted check
+    chRow = await env.DB.prepare('SELECT collection_id FROM challenges WHERE id = ?').bind(challengeId).first();
+  }
   const hasHandicap = chRow && (chRow as { collection_id: string | null }).collection_id != null;
   const orderCol = hasHandicap ? 'corrected_time_s' : 'raw_time_s';
   try {
@@ -2405,7 +2423,7 @@ async function handleChallengeSubmit(
 
   // Load challenge
   const chRow = await env.DB.prepare(
-    'SELECT * FROM challenges WHERE id = ? AND is_public = 1'
+    'SELECT * FROM challenges WHERE id = ? AND is_public = 1 AND is_deleted = 0'
   )
     .bind(challengeId)
     .first();
