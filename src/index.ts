@@ -2086,6 +2086,15 @@ async function handleOrganiserChallengeResults(challengeId: string, athleteId: s
     const results = rows.map((row, i) => {
       const startTime = row.start_time ? String(row.start_time) : '';
       const workoutDate = startTime ? startTime.slice(0, 10) : null;
+      let validationLog: string[] | null = null;
+      if (row.validation_log) {
+        try {
+          const parsed = JSON.parse(String(row.validation_log));
+          validationLog = Array.isArray(parsed) ? parsed : null;
+        } catch {
+          // ignore
+        }
+      }
       return {
         id: row.id,
         rank: i + 1,
@@ -2102,6 +2111,7 @@ async function handleOrganiserChallengeResults(challengeId: string, athleteId: s
         workoutDate,
         validationStatus: row.validation_status ?? 'valid',
         validationNote: row.validation_note ?? null,
+        validationLog,
       };
     });
     return jsonResponse({ results }, 200, true);
@@ -2600,9 +2610,10 @@ async function handleChallengeSubmit(
       .first();
     replaced = !!existingForCategory;
 
+    const validationLogJson = JSON.stringify(validationLog);
     await env.DB.prepare(
-      `INSERT INTO challenge_results (id, challenge_id, athlete_id, activity_id, display_name, raw_time_s, corrected_time_s, points, boat_type, sex, weight_class, crew_avg_age, start_time, validation_status, validation_note, track_latlng, submitted_at, category_key)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'valid', ?, ?, ?, ?)
+      `INSERT INTO challenge_results (id, challenge_id, athlete_id, activity_id, display_name, raw_time_s, corrected_time_s, points, boat_type, sex, weight_class, crew_avg_age, start_time, validation_status, validation_note, validation_log, track_latlng, submitted_at, category_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'valid', ?, ?, ?, ?, ?)
        ON CONFLICT(challenge_id, athlete_id, category_key) DO UPDATE SET
          activity_id = excluded.activity_id,
          display_name = excluded.display_name,
@@ -2616,10 +2627,11 @@ async function handleChallengeSubmit(
          start_time = excluded.start_time,
          validation_status = 'valid',
          validation_note = excluded.validation_note,
+         validation_log = excluded.validation_log,
          track_latlng = excluded.track_latlng,
          submitted_at = excluded.submitted_at`
     )
-      .bind(id, challengeId, athleteId, activityId, displayName, result.timeS, correctedTimeS, points, boatType, sex, weightClass, crewAvgAge, startTime, validationNote, trackLatlng, submittedAt, categoryKey)
+      .bind(id, challengeId, athleteId, activityId, displayName, result.timeS, correctedTimeS, points, boatType, sex, weightClass, crewAvgAge, startTime, validationNote, validationLogJson, trackLatlng, submittedAt, categoryKey)
       .run();
     const existing = await env.DB.prepare(
       'SELECT id FROM challenge_results WHERE challenge_id = ? AND athlete_id = ? AND category_key = ?'
