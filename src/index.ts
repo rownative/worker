@@ -897,35 +897,49 @@ function tryIntervalsJwtAthleteId(bearerToken: string): string | null {
 }
 
 async function verifyIntervalsToken(bearerToken: string): Promise<string | null> {
+  const tokenPrefix = bearerToken.slice(0, 8);
+  const isJwtFormat = bearerToken.split('.').length === 3;
+  console.log(`[verifyIntervalsToken] Token format: ${isJwtFormat ? 'JWT' : 'plain OAuth'} (prefix: ${tokenPrefix}...)`);
+  
   // Try /athlete/0 first (most reliable, works for all OAuth tokens per intervals.icu API)
   const athlete0Url = 'https://intervals.icu/api/v1/athlete/0';
+  console.log('[verifyIntervalsToken] Trying /athlete/0');
   const res0 = await fetch(athlete0Url, {
     headers: { 'Authorization': `Bearer ${bearerToken}` },
   });
   
   if (res0.ok) {
     try {
-      const raw = await res0.json();
+      const text = await res0.text();
+      console.log(`[verifyIntervalsToken] /athlete/0 returned 200 OK, response length: ${text.length} bytes`);
+      const raw = text ? JSON.parse(text) : null;
+      const topLevelKeys = raw && typeof raw === 'object' && raw !== null ? Object.keys(raw as object) : [];
+      const hasNestedAthlete = raw && typeof raw === 'object' && 'athlete' in (raw as object);
+      console.log(`[verifyIntervalsToken] Response keys: [${topLevelKeys.join(', ')}], nested athlete: ${hasNestedAthlete}`);
+      
       const data = flattenAthleteJson(raw);
       if (data) {
         const athleteId = athleteIdFromPayload(data);
         if (athleteId) {
+          console.log(`[verifyIntervalsToken] SUCCESS: Extracted athlete ID: ${athleteId}`);
           return athleteId;
         }
-        console.error('[verifyIntervalsToken] /athlete/0 returned OK but no athlete ID found in response');
+        console.error('[verifyIntervalsToken] /athlete/0 returned OK but no athlete ID found in response after flattening');
       } else {
-        console.error('[verifyIntervalsToken] /athlete/0 returned OK but failed to parse athlete data');
+        console.error('[verifyIntervalsToken] /athlete/0 returned OK but flattenAthleteJson returned null');
       }
     } catch (e) {
       console.error('[verifyIntervalsToken] /athlete/0 JSON parse error:', e);
     }
   } else {
-    console.error(`[verifyIntervalsToken] /athlete/0 failed: ${res0.status}`);
+    const errorText = await res0.text().catch(() => '');
+    console.error(`[verifyIntervalsToken] /athlete/0 failed: ${res0.status}, body: ${errorText.slice(0, 200)}`);
   }
 
   // Fallback: try JWT-decoded athlete ID if available
   const jwtId = tryIntervalsJwtAthleteId(bearerToken);
   if (jwtId) {
+    console.log(`[verifyIntervalsToken] JWT decoded athlete ID: ${jwtId}, trying /athlete/${jwtId}`);
     const jwtUrl = `https://intervals.icu/api/v1/athlete/${encodeURIComponent(jwtId)}`;
     const resJwt = await fetch(jwtUrl, {
       headers: { 'Authorization': `Bearer ${bearerToken}` },
@@ -933,25 +947,36 @@ async function verifyIntervalsToken(bearerToken: string): Promise<string | null>
     
     if (resJwt.ok) {
       try {
-        const raw = await resJwt.json();
+        const text = await resJwt.text();
+        console.log(`[verifyIntervalsToken] /athlete/${jwtId} returned 200 OK, response length: ${text.length} bytes`);
+        const raw = text ? JSON.parse(text) : null;
+        const topLevelKeys = raw && typeof raw === 'object' && raw !== null ? Object.keys(raw as object) : [];
+        const hasNestedAthlete = raw && typeof raw === 'object' && 'athlete' in (raw as object);
+        console.log(`[verifyIntervalsToken] Response keys: [${topLevelKeys.join(', ')}], nested athlete: ${hasNestedAthlete}`);
+        
         const data = flattenAthleteJson(raw);
         if (data) {
           const athleteId = athleteIdFromPayload(data);
           if (athleteId) {
+            console.log(`[verifyIntervalsToken] SUCCESS: Extracted athlete ID: ${athleteId}`);
             return athleteId;
           }
-          console.error(`[verifyIntervalsToken] /athlete/${jwtId} returned OK but no athlete ID found in response`);
+          console.error(`[verifyIntervalsToken] /athlete/${jwtId} returned OK but no athlete ID found in response after flattening`);
         } else {
-          console.error(`[verifyIntervalsToken] /athlete/${jwtId} returned OK but failed to parse athlete data`);
+          console.error(`[verifyIntervalsToken] /athlete/${jwtId} returned OK but flattenAthleteJson returned null`);
         }
       } catch (e) {
         console.error(`[verifyIntervalsToken] /athlete/${jwtId} JSON parse error:`, e);
       }
     } else {
-      console.error(`[verifyIntervalsToken] /athlete/${jwtId} failed: ${resJwt.status}`);
+      const errorText = await resJwt.text().catch(() => '');
+      console.error(`[verifyIntervalsToken] /athlete/${jwtId} failed: ${resJwt.status}, body: ${errorText.slice(0, 200)}`);
     }
+  } else {
+    console.log('[verifyIntervalsToken] Token is not JWT format, no fallback endpoint to try');
   }
 
+  console.error('[verifyIntervalsToken] All attempts failed, returning null');
   return null;
 }
 
