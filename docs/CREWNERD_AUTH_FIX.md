@@ -119,6 +119,40 @@ GET https://rownative.icu/api/courses/kml/liked
 Authorization: ApiKey <athleteId>.<mac>
 ```
 
+## Backward Compatibility
+
+To maintain compatibility with the old RowsAndAll API, Bearer tokens can be used directly on data endpoints without the exchange step:
+
+```bash
+GET https://rownative.icu/api/courses/kml/liked
+Authorization: Bearer <intervals.icu_token>
+```
+
+### Implementation Details
+
+- Bearer tokens are validated against intervals.icu API on first use
+- Results are cached in KV with 1-hour TTL using SHA-256 hash as cache key
+- Cache key format: `bearer-token:sha256:<first_16_chars_of_hash>`
+- On cache hit, no external API call is made
+- Both authentication flows are supported permanently
+
+### Performance Comparison
+
+| Flow | First Request | Subsequent Requests | External Dependency |
+|------|--------------|---------------------|---------------------|
+| **API Key** (new) | Exchange + Data (~2 API calls) | Local verification (~0 API calls) | Only on exchange |
+| **Bearer Token** (legacy) | Validation + Data (~2 API calls) | Cache hit (~1 API call) | intervals.icu on cache miss |
+
+The API key flow is recommended for production use because:
+- No external dependency after initial exchange
+- Faster subsequent requests (local HMAC verification)
+- More resilient to intervals.icu downtime
+
+The Bearer token flow is maintained for backward compatibility and simpler integration:
+- One-step authentication (no exchange needed)
+- Works exactly like the old RowsAndAll API
+- Suitable for testing and simple integrations
+
 ## References
 
 - intervals.icu API docs note that `/athlete/0` is an alias for the authenticated user

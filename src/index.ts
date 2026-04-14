@@ -720,8 +720,10 @@ async function bundleKml(ids: string[]): Promise<Response> {
 async function getAthleteIdFromRequest(request: Request, env: Env): Promise<string | null> {
   const session = await getSessionFromRequest(request, env);
   if (session) return session.athleteId;
-  // API key auth (CrewNerd)
+  
   const authHeader = request.headers.get('Authorization') ?? '';
+  
+  // API key auth (CrewNerd new flow)
   if (authHeader.startsWith('ApiKey ')) {
     const key = authHeader.slice(7);
     const dot = key.indexOf('.');
@@ -732,6 +734,14 @@ async function getAthleteIdFromRequest(request: Request, env: Env): Promise<stri
     if (!ok) return null;
     return athleteId;
   }
+  
+  // Bearer token auth (CrewNerd backward compatibility)
+  if (authHeader.startsWith('Bearer ')) {
+    const bearerToken = authHeader.slice(7);
+    const athleteId = await verifyBearerTokenCached(bearerToken, env);
+    return athleteId;
+  }
+  
   return null;
 }
 
@@ -894,6 +904,38 @@ function tryIntervalsJwtAthleteId(bearerToken: string): string | null {
     return null;
   }
   return null;
+}
+
+/** Verify Bearer token with KV caching (1h TTL). Returns athleteId or null. */
+async function verifyBearerTokenCached(bearerToken: string, env: Env): Promise<string | null> {
+  // Compute SHA-256 hash of token for cache key (avoid storing raw tokens)
+  const encoder = new TextEncoder();
+  const data = encoder.encode(bearerToken);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  const hashPrefix = hashHex.slice(0, 16);
+  
+  const cacheKey = `bearer-token:sha256:${hashPrefix}`;
+  const cached = await env.ROWING_COURSES.get(cacheKey);
+  
+  if (cached) {
+    console.log(`[verifyBearerTokenCached] Cache hit for token prefix ${bearerToken.slice(0, 8)}...`);
+    return cached; // cached athleteId
+  }
+  
+  console.log(`[verifyBearerTokenCached] Cache miss for token prefix ${bearerToken.slice(0, 8)}..., validating with intervals.icu`);
+  const athleteId = await verifyIntervalsToken(bearerToken);
+  
+  if (athleteId) {
+    // Cache for 1 hour (3600 seconds)
+    await env.ROWING_COURSES.put(cacheKey, athleteId, {
+      expirationTtl: 3600,
+    });
+    console.log(`[verifyBearerTokenCached] Cached athleteId ${athleteId} for 1 hour`);
+  }
+  
+  return athleteId;
 }
 
 async function verifyIntervalsToken(bearerToken: string): Promise<string | null> {
