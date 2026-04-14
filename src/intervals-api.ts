@@ -156,7 +156,7 @@ function pickString(data: Record<string, unknown>, keys: string[]): string | und
 }
 
 /** Merge nested objects intervals.icu sometimes returns on athlete/self. */
-function flattenAthleteJson(raw: unknown): Record<string, unknown> | null {
+export function flattenAthleteJson(raw: unknown): Record<string, unknown> | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const d = raw as Record<string, unknown>;
   const nested = d.athlete;
@@ -166,7 +166,7 @@ function flattenAthleteJson(raw: unknown): Record<string, unknown> | null {
   return d;
 }
 
-function athleteIdFromPayload(flat: Record<string, unknown>): string | null {
+export function athleteIdFromPayload(flat: Record<string, unknown>): string | null {
   const rawId = flat.id;
   if (rawId == null) return null;
   if (typeof rawId === 'string' && rawId.trim()) return rawId.trim();

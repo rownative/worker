@@ -9,6 +9,8 @@ import {
   fetchIntervalsAthleteProfileWithMeta,
   fetchIntervalsStreams,
   isOtwRowing,
+  flattenAthleteJson,
+  athleteIdFromPayload,
   type IntervalsActivity,
   type IntervalsAthleteSelfMeta,
 } from './intervals-api';
@@ -895,22 +897,61 @@ function tryIntervalsJwtAthleteId(bearerToken: string): string | null {
 }
 
 async function verifyIntervalsToken(bearerToken: string): Promise<string | null> {
-  const urls: string[] = [];
+  // Try /athlete/0 first (most reliable, works for all OAuth tokens per intervals.icu API)
+  const athlete0Url = 'https://intervals.icu/api/v1/athlete/0';
+  const res0 = await fetch(athlete0Url, {
+    headers: { 'Authorization': `Bearer ${bearerToken}` },
+  });
+  
+  if (res0.ok) {
+    try {
+      const raw = await res0.json();
+      const data = flattenAthleteJson(raw);
+      if (data) {
+        const athleteId = athleteIdFromPayload(data);
+        if (athleteId) {
+          return athleteId;
+        }
+        console.error('[verifyIntervalsToken] /athlete/0 returned OK but no athlete ID found in response');
+      } else {
+        console.error('[verifyIntervalsToken] /athlete/0 returned OK but failed to parse athlete data');
+      }
+    } catch (e) {
+      console.error('[verifyIntervalsToken] /athlete/0 JSON parse error:', e);
+    }
+  } else {
+    console.error(`[verifyIntervalsToken] /athlete/0 failed: ${res0.status}`);
+  }
+
+  // Fallback: try JWT-decoded athlete ID if available
   const jwtId = tryIntervalsJwtAthleteId(bearerToken);
   if (jwtId) {
-    urls.push(`https://intervals.icu/api/v1/athlete/${encodeURIComponent(jwtId)}`);
-  }
-  urls.push('https://intervals.icu/api/v1/athlete/0');
-  urls.push('https://intervals.icu/api/v1/athlete/self');
-  for (const url of urls) {
-    const res = await fetch(url, {
+    const jwtUrl = `https://intervals.icu/api/v1/athlete/${encodeURIComponent(jwtId)}`;
+    const resJwt = await fetch(jwtUrl, {
       headers: { 'Authorization': `Bearer ${bearerToken}` },
     });
-    if (!res.ok) continue;
-    const data = await res.json() as { id?: string | number };
-    if (data.id == null) continue;
-    return typeof data.id === 'number' && Number.isFinite(data.id) ? String(data.id) : String(data.id).trim() || null;
+    
+    if (resJwt.ok) {
+      try {
+        const raw = await resJwt.json();
+        const data = flattenAthleteJson(raw);
+        if (data) {
+          const athleteId = athleteIdFromPayload(data);
+          if (athleteId) {
+            return athleteId;
+          }
+          console.error(`[verifyIntervalsToken] /athlete/${jwtId} returned OK but no athlete ID found in response`);
+        } else {
+          console.error(`[verifyIntervalsToken] /athlete/${jwtId} returned OK but failed to parse athlete data`);
+        }
+      } catch (e) {
+        console.error(`[verifyIntervalsToken] /athlete/${jwtId} JSON parse error:`, e);
+      }
+    } else {
+      console.error(`[verifyIntervalsToken] /athlete/${jwtId} failed: ${resJwt.status}`);
+    }
   }
+
   return null;
 }
 
