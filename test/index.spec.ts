@@ -1,5 +1,5 @@
 import { env, createExecutionContext, waitOnExecutionContext, SELF } from 'cloudflare:test';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import worker from '../src/index';
 
 const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
@@ -369,6 +369,320 @@ describe('Rowing Courses Worker', () => {
 				method: 'POST',
 			});
 			expect(response.status).toBe(401);
+		});
+	});
+
+	describe('CrewNerd Authentication (mocked)', () => {
+		let originalFetch: typeof globalThis.fetch;
+
+		beforeEach(() => {
+			originalFetch = globalThis.fetch;
+		});
+
+		afterEach(() => {
+			globalThis.fetch = originalFetch;
+		});
+
+		it('POST /api/auth/crewnerd with valid token (flat response) returns API key', async () => {
+			globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+				const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+				if (url === 'https://intervals.icu/api/v1/athlete/0') {
+					return new Response(JSON.stringify({ id: 'i58453', name: 'Tony Test' }), {
+						status: 200,
+						headers: { 'Content-Type': 'application/json' },
+					});
+				}
+				return originalFetch(input as RequestInfo | URL);
+			}) as typeof fetch;
+
+			const response = await fetchAndWait('https://rownative.icu/api/auth/crewnerd', {
+				method: 'POST',
+				headers: { 'Authorization': 'Bearer valid-oauth-token-flat' },
+			});
+
+			expect(response.status).toBe(200);
+			const data = await response.json() as { api_key?: string };
+			expect(data.api_key).toBeDefined();
+			expect(typeof data.api_key).toBe('string');
+			expect(data.api_key?.split('.').length).toBe(2);
+		});
+
+		it('POST /api/auth/crewnerd with valid token (nested athlete response) returns API key', async () => {
+			globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+				const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+				if (url === 'https://intervals.icu/api/v1/athlete/0') {
+					return new Response(JSON.stringify({ 
+						athlete: { 
+							id: 'i58453', 
+							name: 'Tony Test',
+							email: 'tony@example.com'
+						} 
+					}), {
+						status: 200,
+						headers: { 'Content-Type': 'application/json' },
+					});
+				}
+				return originalFetch(input as RequestInfo | URL);
+			}) as typeof fetch;
+
+			const response = await fetchAndWait('https://rownative.icu/api/auth/crewnerd', {
+				method: 'POST',
+				headers: { 'Authorization': 'Bearer valid-oauth-token-nested' },
+			});
+
+			expect(response.status).toBe(200);
+			const data = await response.json() as { api_key?: string };
+			expect(data.api_key).toBeDefined();
+			expect(typeof data.api_key).toBe('string');
+			expect(data.api_key?.split('.').length).toBe(2);
+		});
+
+		it('POST /api/auth/crewnerd with invalid token returns 401', async () => {
+			globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+				const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+				if (url === 'https://intervals.icu/api/v1/athlete/0') {
+					return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+						status: 401,
+						headers: { 'Content-Type': 'application/json' },
+					});
+				}
+				return originalFetch(input as RequestInfo | URL);
+			}) as typeof fetch;
+
+			const response = await fetchAndWait('https://rownative.icu/api/auth/crewnerd', {
+				method: 'POST',
+				headers: { 'Authorization': 'Bearer invalid-token' },
+			});
+
+			expect(response.status).toBe(401);
+			expect(await response.text()).toBe('Invalid token');
+		});
+
+		it('POST /api/auth/crewnerd with numeric athlete ID returns API key', async () => {
+			globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+				const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+				if (url === 'https://intervals.icu/api/v1/athlete/0') {
+					return new Response(JSON.stringify({ id: 58453, name: 'Tony Test' }), {
+						status: 200,
+						headers: { 'Content-Type': 'application/json' },
+					});
+				}
+				return originalFetch(input as RequestInfo | URL);
+			}) as typeof fetch;
+
+			const response = await fetchAndWait('https://rownative.icu/api/auth/crewnerd', {
+				method: 'POST',
+				headers: { 'Authorization': 'Bearer valid-oauth-numeric-id' },
+			});
+
+			expect(response.status).toBe(200);
+			const data = await response.json() as { api_key?: string };
+			expect(data.api_key).toBeDefined();
+			expect(data.api_key).toMatch(/^58453\./);
+		});
+
+		it('POST /api/auth/crewnerd with response missing id field returns 401', async () => {
+			globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+				const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+				if (url === 'https://intervals.icu/api/v1/athlete/0') {
+					return new Response(JSON.stringify({ name: 'Tony Test', email: 'tony@test.com' }), {
+						status: 200,
+						headers: { 'Content-Type': 'application/json' },
+					});
+				}
+				return originalFetch(input as RequestInfo | URL);
+			}) as typeof fetch;
+
+			const response = await fetchAndWait('https://rownative.icu/api/auth/crewnerd', {
+				method: 'POST',
+				headers: { 'Authorization': 'Bearer token-no-id-field' },
+			});
+
+			expect(response.status).toBe(401);
+			expect(await response.text()).toBe('Invalid token');
+		});
+
+		it('POST /api/auth/crewnerd with JWT token uses fallback endpoint', async () => {
+			const jwtToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdGhsZXRlSWQiOiJpNTg0NTMiLCJuYW1lIjoiVG9ueSJ9.fakesig';
+			
+			globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+				const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+				if (url === 'https://intervals.icu/api/v1/athlete/0') {
+					return new Response(JSON.stringify({ error: 'Not found' }), {
+						status: 404,
+						headers: { 'Content-Type': 'application/json' },
+					});
+				}
+				if (url === 'https://intervals.icu/api/v1/athlete/i58453') {
+					return new Response(JSON.stringify({ id: 'i58453', name: 'Tony Test' }), {
+						status: 200,
+						headers: { 'Content-Type': 'application/json' },
+					});
+				}
+				return originalFetch(input as RequestInfo | URL);
+			}) as typeof fetch;
+
+			const response = await fetchAndWait('https://rownative.icu/api/auth/crewnerd', {
+				method: 'POST',
+				headers: { 'Authorization': `Bearer ${jwtToken}` },
+			});
+
+			expect(response.status).toBe(200);
+			const data = await response.json() as { api_key?: string };
+			expect(data.api_key).toBeDefined();
+			expect(data.api_key).toMatch(/^i58453\./);
+		});
+
+		it('End-to-end: Exchange token and use API key to fetch liked courses', async () => {
+			globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+				const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+				if (url === 'https://intervals.icu/api/v1/athlete/0') {
+					return new Response(JSON.stringify({ id: 'i58453', name: 'Tony Test' }), {
+						status: 200,
+						headers: { 'Content-Type': 'application/json' },
+					});
+				}
+				return originalFetch(input as RequestInfo | URL);
+			}) as typeof fetch;
+
+			const authResponse = await fetchAndWait('https://rownative.icu/api/auth/crewnerd', {
+				method: 'POST',
+				headers: { 'Authorization': 'Bearer valid-oauth-token-e2e' },
+			});
+
+			expect(authResponse.status).toBe(200);
+			const authData = await authResponse.json() as { api_key?: string };
+			expect(authData.api_key).toBeDefined();
+			const apiKey = authData.api_key!;
+
+			const likedResponse = await fetchAndWait('https://rownative.icu/api/courses/kml/liked', {
+				method: 'GET',
+				headers: { 'Authorization': `ApiKey ${apiKey}` },
+			});
+
+			expect(likedResponse.status).toBe(200);
+			expect(likedResponse.headers.get('Content-Type')).toContain('application/vnd.google-earth.kml+xml');
+		});
+
+		it('End-to-end: Invalid API key returns 401', async () => {
+			const likedResponse = await fetchAndWait('https://rownative.icu/api/courses/kml/liked', {
+				method: 'GET',
+				headers: { 'Authorization': 'ApiKey i58453.invalid-mac-signature' },
+			});
+
+			expect(likedResponse.status).toBe(401);
+		});
+	});
+
+	describe('Bearer Token Backward Compatibility', () => {
+		let originalFetch: typeof globalThis.fetch;
+
+		beforeEach(() => {
+			originalFetch = globalThis.fetch;
+		});
+
+		afterEach(() => {
+			globalThis.fetch = originalFetch;
+		});
+
+		it('GET /api/courses/kml/liked with Bearer token returns KML', async () => {
+			globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+				const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+				if (url === 'https://intervals.icu/api/v1/athlete/0') {
+					return new Response(JSON.stringify({ id: 'i58453', name: 'Bearer User' }), {
+						status: 200,
+						headers: { 'Content-Type': 'application/json' },
+					});
+				}
+				return originalFetch(input as RequestInfo | URL);
+			}) as typeof fetch;
+
+			const response = await fetchAndWait('https://rownative.icu/api/courses/kml/liked', {
+				method: 'GET',
+				headers: { 'Authorization': 'Bearer valid-bearer-token-compat' },
+			});
+
+			expect(response.status).toBe(200);
+			expect(response.headers.get('Content-Type')).toContain('application/vnd.google-earth.kml+xml');
+		});
+
+		it('Bearer token with cache hit skips intervals.icu API call', async () => {
+			let apiCallCount = 0;
+
+			globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+				const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+				if (url === 'https://intervals.icu/api/v1/athlete/0') {
+					apiCallCount++;
+					return new Response(JSON.stringify({ id: 'i58453', name: 'Cached User' }), {
+						status: 200,
+						headers: { 'Content-Type': 'application/json' },
+					});
+				}
+				return originalFetch(input as RequestInfo | URL);
+			}) as typeof fetch;
+
+			const response1 = await fetchAndWait('https://rownative.icu/api/courses/kml/liked', {
+				method: 'GET',
+				headers: { 'Authorization': 'Bearer cacheable-token-test' },
+			});
+
+			expect(response1.status).toBe(200);
+			expect(apiCallCount).toBe(1);
+
+			const response2 = await fetchAndWait('https://rownative.icu/api/courses/kml/liked', {
+				method: 'GET',
+				headers: { 'Authorization': 'Bearer cacheable-token-test' },
+			});
+
+			expect(response2.status).toBe(200);
+			expect(apiCallCount).toBe(1);
+		});
+
+		it('Invalid Bearer token on data endpoint returns 401', async () => {
+			globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+				const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+				if (url === 'https://intervals.icu/api/v1/athlete/0') {
+					return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+						status: 401,
+						headers: { 'Content-Type': 'application/json' },
+					});
+				}
+				return originalFetch(input as RequestInfo | URL);
+			}) as typeof fetch;
+
+			const response = await fetchAndWait('https://rownative.icu/api/courses/kml/liked', {
+				method: 'GET',
+				headers: { 'Authorization': 'Bearer invalid-bearer-token' },
+			});
+
+			expect(response.status).toBe(401);
+		});
+
+		it('Bearer token with nested athlete response works on data endpoint', async () => {
+			globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+				const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+				if (url === 'https://intervals.icu/api/v1/athlete/0') {
+					return new Response(JSON.stringify({ 
+						athlete: { 
+							id: 'i58453', 
+							name: 'Nested User',
+							email: 'nested@example.com'
+						} 
+					}), {
+						status: 200,
+						headers: { 'Content-Type': 'application/json' },
+					});
+				}
+				return originalFetch(input as RequestInfo | URL);
+			}) as typeof fetch;
+
+			const response = await fetchAndWait('https://rownative.icu/api/courses/kml/liked', {
+				method: 'GET',
+				headers: { 'Authorization': 'Bearer bearer-nested-athlete-test' },
+			});
+
+			expect(response.status).toBe(200);
+			expect(response.headers.get('Content-Type')).toContain('application/vnd.google-earth.kml+xml');
 		});
 	});
 });

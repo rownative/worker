@@ -55,7 +55,17 @@ The worker runs on Cloudflare and handles all `/api/*` and `/oauth/*` routes for
 ### Authentication methods
 
 1. **Cookie (browser)** — After OAuth, the `rn_session` cookie authenticates requests. Used by the rownative.icu web app.
-2. **API key (CrewNerd)** — Use `Authorization: ApiKey <athleteId>.<mac>` (obtained from `/api/auth/crewnerd`).
+2. **API key (CrewNerd)** — Use `Authorization: ApiKey <athleteId>.<mac>` (obtained from `/api/auth/crewnerd`). Recommended for best performance (local verification, no external API calls).
+3. **Bearer token (CrewNerd)** — Use `Authorization: Bearer <intervals.icu_token>` directly on data endpoints. Backward compatible with the old RowsAndAll API. Validated against intervals.icu and cached for 1 hour.
+
+#### CrewNerd Authentication Trade-offs
+
+| Method | Flow | Performance | External API Dependency |
+|--------|------|-------------|------------------------|
+| **API key** (new) | 2-step: exchange token → use API key | Fast (local HMAC verification) | Only on initial exchange |
+| **Bearer token** (legacy) | 1-step: use token directly | First request slower, cached 1h | intervals.icu on cache miss |
+
+Both methods are supported permanently. The API key flow is recommended for production use due to its independence from external services once the key is obtained.
 
 ## OAuth Flow
 
