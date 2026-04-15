@@ -974,8 +974,53 @@ async function verifyIntervalsToken(bearerToken: string): Promise<string | null>
       console.error('[verifyIntervalsToken] /athlete/0 JSON parse error:', e);
     }
   } else {
-    const errorText = await res0.text().catch(() => '');
-    console.error(`[verifyIntervalsToken] /athlete/0 failed: ${res0.status}, body: ${errorText.slice(0, 200)}`);
+    const bearerStatus = res0.status;
+    const bearerErrorText = await res0.text().catch(() => '');
+    console.error(`[verifyIntervalsToken] /athlete/0 Bearer failed: ${bearerStatus}, body: ${bearerErrorText.slice(0, 200)}`);
+
+    // Fallback: try the token as an intervals.icu API key using HTTP Basic auth.
+    // intervals.icu API keys require: Authorization: Basic <base64("API_KEY:" + key)>
+    if (bearerStatus === 401 || bearerStatus === 403) {
+      console.log('[verifyIntervalsToken] Trying /athlete/0 with API key Basic auth');
+      let basicAuth: string;
+      try {
+        basicAuth = `Basic ${btoa('API_KEY:' + bearerToken)}`;
+      } catch {
+        console.error('[verifyIntervalsToken] Failed to encode API key for Basic auth (non-ASCII characters?)');
+        basicAuth = '';
+      }
+      if (basicAuth) {
+        const res0Basic = await fetch(athlete0Url, {
+          headers: { 'Authorization': basicAuth },
+        });
+        if (res0Basic.ok) {
+          try {
+            const text = await res0Basic.text();
+            console.log(`[verifyIntervalsToken] /athlete/0 API key Basic auth returned 200 OK, response length: ${text.length} bytes`);
+            const raw = text ? JSON.parse(text) : null;
+            const topLevelKeys = raw && typeof raw === 'object' && raw !== null ? Object.keys(raw as object) : [];
+            const hasNestedAthlete = raw && typeof raw === 'object' && 'athlete' in (raw as object);
+            console.log(`[verifyIntervalsToken] Response keys: [${topLevelKeys.join(', ')}], nested athlete: ${hasNestedAthlete}`);
+            const data = flattenAthleteJson(raw);
+            if (data) {
+              const athleteId = athleteIdFromPayload(data);
+              if (athleteId) {
+                console.log(`[verifyIntervalsToken] SUCCESS via API key Basic auth: Extracted athlete ID: ${athleteId}`);
+                return athleteId;
+              }
+              console.error('[verifyIntervalsToken] /athlete/0 API key Basic auth returned OK but no athlete ID found after flattening');
+            } else {
+              console.error('[verifyIntervalsToken] /athlete/0 API key Basic auth returned OK but flattenAthleteJson returned null');
+            }
+          } catch (e) {
+            console.error('[verifyIntervalsToken] /athlete/0 API key Basic auth JSON parse error:', e);
+          }
+        } else {
+          const basicErrorText = await res0Basic.text().catch(() => '');
+          console.error(`[verifyIntervalsToken] /athlete/0 API key Basic auth failed: ${res0Basic.status}, body: ${basicErrorText.slice(0, 200)}`);
+        }
+      }
+    }
   }
 
   // Fallback: try JWT-decoded athlete ID if available
