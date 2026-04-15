@@ -985,8 +985,8 @@ async function verifyIntervalsToken(bearerToken: string): Promise<string | null>
       let basicAuth: string;
       try {
         basicAuth = `Basic ${btoa('API_KEY:' + bearerToken)}`;
-      } catch {
-        console.error('[verifyIntervalsToken] Failed to encode API key for Basic auth (non-ASCII characters?)');
+      } catch (e) {
+        console.error('[verifyIntervalsToken] Failed to encode API key for Basic auth (non-ASCII characters?):', e);
         basicAuth = '';
       }
       if (basicAuth) {
