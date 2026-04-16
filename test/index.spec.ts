@@ -533,6 +533,74 @@ describe('Rowing Courses Worker', () => {
 			expect(data.api_key).toMatch(/^i58453\./);
 		});
 
+		it('POST /api/auth/crewnerd with intervals.icu API key (Basic auth fallback) returns API key', async () => {
+			const intervalsApiKey = 'abc123def456';
+			const expectedBasicAuth = `Basic ${btoa('API_KEY:' + intervalsApiKey)}`;
+
+			globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+				const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+				if (url === 'https://intervals.icu/api/v1/athlete/0') {
+					const authHeader = (init?.headers as Record<string, string>)?.['Authorization'] ?? '';
+					// Bearer auth fails (API keys are not OAuth tokens)
+					if (authHeader.startsWith('Bearer ')) {
+						return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+							status: 401,
+							headers: { 'Content-Type': 'application/json' },
+						});
+					}
+					// Basic auth with API_KEY:<key> succeeds
+					if (authHeader === expectedBasicAuth) {
+						return new Response(JSON.stringify({ id: 'i58453', name: 'Tony Test' }), {
+							status: 200,
+							headers: { 'Content-Type': 'application/json' },
+						});
+					}
+					return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+						status: 401,
+						headers: { 'Content-Type': 'application/json' },
+					});
+				}
+				return originalFetch(input as RequestInfo | URL, init);
+			}) as typeof fetch;
+
+			const response = await fetchAndWait('https://rownative.icu/api/auth/crewnerd', {
+				method: 'POST',
+				headers: { 'Authorization': `Bearer ${intervalsApiKey}` },
+			});
+
+			expect(response.status).toBe(200);
+			const data = await response.json() as { api_key?: string };
+			expect(data.api_key).toBeDefined();
+			expect(data.api_key).toMatch(/^i58453\./);
+		});
+
+		it('POST /api/auth/crewnerd with invalid API key (Basic auth also fails) returns 401', async () => {
+			const seenAuthHeaders: string[] = [];
+			globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+				const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+				if (url === 'https://intervals.icu/api/v1/athlete/0') {
+					const authHeader = (init?.headers as Record<string, string>)?.['Authorization'] ?? '';
+					seenAuthHeaders.push(authHeader);
+					return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+						status: 401,
+						headers: { 'Content-Type': 'application/json' },
+					});
+				}
+				return originalFetch(input as RequestInfo | URL, init);
+			}) as typeof fetch;
+
+			const response = await fetchAndWait('https://rownative.icu/api/auth/crewnerd', {
+				method: 'POST',
+				headers: { 'Authorization': 'Bearer invalid-api-key' },
+			});
+
+			expect(response.status).toBe(401);
+			expect(await response.text()).toBe('Invalid token');
+			// Verify both Bearer and Basic auth fallback were attempted
+			expect(seenAuthHeaders.some(h => h.startsWith('Bearer '))).toBe(true);
+			expect(seenAuthHeaders.some(h => h.startsWith('Basic '))).toBe(true);
+		});
+
 		it('End-to-end: Exchange token and use API key to fetch liked courses', async () => {
 			globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
 				const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
