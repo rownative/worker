@@ -823,6 +823,30 @@ describe('Rowing Courses Worker', () => {
 			expect(seenAuthHeaders[0]).toMatch(/^Bearer /);
 		});
 
+		it('POST /api/auth/crewnerd with OAuth scope error returns helpful message', async () => {
+			globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+				const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+				if (url === 'https://intervals.icu/api/v1/athlete/0') {
+					// Return 403 with scope error (like Tony's case)
+					return new Response(JSON.stringify({ status: 403, error: 'Access denied (SETTINGS:READ scope required)' }), {
+						status: 403,
+						headers: { 'Content-Type': 'application/json' },
+					});
+				}
+				return originalFetch(input as RequestInfo | URL);
+			}) as typeof fetch;
+
+			const response = await fetchAndWait('https://rownative.icu/api/auth/crewnerd', {
+				method: 'POST',
+				headers: { 'Authorization': 'Bearer oauth-token-missing-scope' },
+			});
+
+			expect(response.status).toBe(401);
+			const errorText = await response.text();
+			expect(errorText).toContain('authorization needs to be updated');
+			expect(errorText).toContain('log out and log in again');
+		});
+
 		it('End-to-end: Exchange token and use API key to fetch liked courses', async () => {
 			globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
 				const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;

@@ -319,9 +319,12 @@ export default {
         return new Response('Missing bearer token', { status: 401 });
       }
       const bearerToken = authHeader.slice(7);
-      const athleteId = await verifyIntervalsToken(bearerToken);
-      if (!athleteId) return new Response('Invalid token', { status: 401 });
-      const apiKey = await apiKeyForAthlete(athleteId, env.TOKEN_ENCRYPTION_KEY);
+      const result = await verifyIntervalsToken(bearerToken);
+      if (!result.athleteId) {
+        const errorMessage = result.errorHint || 'Invalid token';
+        return new Response(errorMessage, { status: 401 });
+      }
+      const apiKey = await apiKeyForAthlete(result.athleteId, env.TOKEN_ENCRYPTION_KEY);
       return new Response(JSON.stringify({ api_key: apiKey }), {
         headers: { 'Content-Type': 'application/json' },
       });
@@ -925,20 +928,20 @@ async function verifyBearerTokenCached(bearerToken: string, env: Env): Promise<s
   }
   
   console.log(`[verifyBearerTokenCached] Cache miss for token prefix ${bearerToken.slice(0, 8)}..., validating with intervals.icu`);
-  const athleteId = await verifyIntervalsToken(bearerToken);
+  const result = await verifyIntervalsToken(bearerToken);
   
-  if (athleteId) {
+  if (result.athleteId) {
     // Cache for 1 hour (3600 seconds)
-    await env.ROWING_COURSES.put(cacheKey, athleteId, {
+    await env.ROWING_COURSES.put(cacheKey, result.athleteId, {
       expirationTtl: 3600,
     });
-    console.log(`[verifyBearerTokenCached] Cached athleteId ${athleteId} for 1 hour`);
+    console.log(`[verifyBearerTokenCached] Cached athleteId ${result.athleteId} for 1 hour`);
   }
   
-  return athleteId;
+  return result.athleteId;
 }
 
-async function verifyIntervalsToken(bearerToken: string): Promise<string | null> {
+async function verifyIntervalsToken(bearerToken: string): Promise<{ athleteId: string | null; errorHint?: string }> {
   const tokenPrefix = bearerToken.slice(0, 8);
   const isJwtFormat = bearerToken.split('.').length === 3;
   console.log(`[verifyIntervalsToken] Token format: ${isJwtFormat ? 'JWT' : 'plain OAuth'} (prefix: ${tokenPrefix}...)`);
@@ -964,7 +967,7 @@ async function verifyIntervalsToken(bearerToken: string): Promise<string | null>
         const athleteId = athleteIdFromPayload(data);
         if (athleteId) {
           console.log(`[verifyIntervalsToken] SUCCESS: Extracted athlete ID: ${athleteId}`);
-          return athleteId;
+          return { athleteId };
         }
         console.error('[verifyIntervalsToken] /athlete/0 returned OK but no athlete ID found in response after flattening');
       } else {
@@ -977,6 +980,15 @@ async function verifyIntervalsToken(bearerToken: string): Promise<string | null>
     const bearerStatus = res0.status;
     const bearerErrorText = await res0.text().catch(() => '');
     console.error(`[verifyIntervalsToken] /athlete/0 Bearer failed: ${bearerStatus}, body: ${bearerErrorText.slice(0, 200)}`);
+
+    // Check for OAuth scope issues
+    if (bearerStatus === 403 && bearerErrorText.includes('SETTINGS:READ scope required')) {
+      console.log('[verifyIntervalsToken] Detected missing OAuth scope - token needs re-authorization');
+      return { 
+        athleteId: null, 
+        errorHint: 'Your authorization needs to be updated. Please log out and log in again to grant the required permissions.' 
+      };
+    }
 
     // Fallback: try the token as an intervals.icu API key using HTTP Basic auth.
     // intervals.icu API keys require: Authorization: Basic <base64("API_KEY:" + key)>
@@ -1006,7 +1018,7 @@ async function verifyIntervalsToken(bearerToken: string): Promise<string | null>
               const athleteId = athleteIdFromPayload(data);
               if (athleteId) {
                 console.log(`[verifyIntervalsToken] SUCCESS via API key Basic auth: Extracted athlete ID: ${athleteId}`);
-                return athleteId;
+                return { athleteId };
               }
               console.error('[verifyIntervalsToken] /athlete/0 API key Basic auth returned OK but no athlete ID found after flattening');
             } else {
@@ -1046,7 +1058,7 @@ async function verifyIntervalsToken(bearerToken: string): Promise<string | null>
           const athleteId = athleteIdFromPayload(data);
           if (athleteId) {
             console.log(`[verifyIntervalsToken] SUCCESS: Extracted athlete ID: ${athleteId}`);
-            return athleteId;
+            return { athleteId };
           }
           console.error(`[verifyIntervalsToken] /athlete/${jwtId} returned OK but no athlete ID found in response after flattening`);
         } else {
@@ -1064,7 +1076,7 @@ async function verifyIntervalsToken(bearerToken: string): Promise<string | null>
   }
 
   console.error('[verifyIntervalsToken] All attempts failed, returning null');
-  return null;
+  return { athleteId: null };
 }
 
 interface Session {
