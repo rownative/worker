@@ -215,7 +215,7 @@ export default {
     if (path === '/api/courses/kml/liked/' || path === '/api/courses/kml/liked') {
       const athleteId = await getAthleteIdFromRequest(request, env);
       if (!athleteId) return new Response('Unauthorised', { status: 401 });
-      const liked: string[] = JSON.parse((await env.ROWING_COURSES.get(`liked:${athleteId}`)) ?? '[]');
+      const liked: string[] = env.ROWING_COURSES ? JSON.parse((await env.ROWING_COURSES.get(`liked:${athleteId}`)) ?? '[]') : [];
       return bundleKml(liked);
     }
 
@@ -237,6 +237,12 @@ export default {
       const action = followMatch[2];
       const athleteId = await getAthleteIdFromRequest(request, env);
       if (!athleteId) return new Response('Unauthorised', { status: 401 });
+      if (!env.ROWING_COURSES) {
+        return new Response(JSON.stringify({ error: 'Service temporarily unavailable' }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
       const kvKey = `liked:${athleteId}`;
       const liked: string[] = JSON.parse((await env.ROWING_COURSES.get(kvKey)) ?? '[]');
       const updated = action === 'follow'
@@ -286,7 +292,7 @@ export default {
           }
         }
         const [liked, isOrg] = await Promise.all([
-          env.ROWING_COURSES.get(`liked:${athleteId}`).then((v) => JSON.parse(v ?? '[]') as string[]),
+          env.ROWING_COURSES ? env.ROWING_COURSES.get(`liked:${athleteId}`).then((v) => JSON.parse(v ?? '[]') as string[]) : Promise.resolve([]),
           isOrganizer(athleteId, env, request),
         ]);
         // Always include athleteDisplayName (null if unresolved) — JSON.stringify omits undefined keys.
@@ -373,7 +379,9 @@ export default {
       console.log(`[oauth] authorize: generated state=${state}, redirect_uri=${redirectUri}`);
       // Store state in KV; value 'local' or 'local:<returnTo>' signals local dev
       const stateVal = isLocal ? (safeReturn ? `local:${safeReturn}` : 'local') : '1';
-      await env.ROWING_COURSES.put(`oauth_state:${state}`, stateVal, { expirationTtl: 600 });
+      if (env.ROWING_COURSES) {
+        await env.ROWING_COURSES.put(`oauth_state:${state}`, stateVal, { expirationTtl: 600 });
+      }
       const params = new URLSearchParams({
         client_id: env.INTERVALS_CLIENT_ID,
         redirect_uri: redirectUri,
@@ -401,7 +409,7 @@ export default {
       const cookieHeader = request.headers.get('Cookie') ?? '';
       const stateMatch = cookieHeader.match(/rn_oauth_state=([^;]+)/);
       let storedState = stateMatch ? stateMatch[1].trim() : null;
-      const kvVal = state ? await env.ROWING_COURSES.get(`oauth_state:${state}`) : null;
+      const kvVal = state && env.ROWING_COURSES ? await env.ROWING_COURSES.get(`oauth_state:${state}`) : null;
       if (!storedState && kvVal) storedState = state;
       console.log(`[oauth] callback: code present=${!!code}, state from URL=${state}`);
       console.log(`[oauth] callback: cookie header present=${cookieHeader.length > 0}, stored state=${storedState}`);
@@ -411,7 +419,9 @@ export default {
         console.log(`[oauth] callback: validation failed — ${reason}`);
         return new Response(reason, { status: 400 });
       }
-      await env.ROWING_COURSES.delete(`oauth_state:${state}`);
+      if (env.ROWING_COURSES) {
+        await env.ROWING_COURSES.delete(`oauth_state:${state}`);
+      }
       const isLocal = kvVal === 'local' || (typeof kvVal === 'string' && kvVal.startsWith('local:'));
       const returnToRaw = (typeof kvVal === 'string' && kvVal.startsWith('local:')) ? kvVal.slice(6) : null;
       const returnTo = safeLocalReturnTo(returnToRaw);
@@ -750,14 +760,16 @@ async function getAthleteIdFromRequest(request: Request, env: Env): Promise<stri
 
 /** Fetch organisers.json from GitHub, cached in KV. Returns set of athlete IDs. */
 async function getOrganiserIds(env: Env): Promise<Set<string>> {
-  const cached = await env.ROWING_COURSES.get(ORGANISERS_CACHE_KEY);
-  if (cached) {
-    try {
-      const arr = JSON.parse(cached) as unknown;
-      const ids = Array.isArray(arr) ? arr.map((x) => String(x)) : [];
-      return new Set(ids);
-    } catch {
-      // fall through to fetch
+  if (env.ROWING_COURSES) {
+    const cached = await env.ROWING_COURSES.get(ORGANISERS_CACHE_KEY);
+    if (cached) {
+      try {
+        const arr = JSON.parse(cached) as unknown;
+        const ids = Array.isArray(arr) ? arr.map((x) => String(x)) : [];
+        return new Set(ids);
+      } catch {
+        // fall through to fetch
+      }
     }
   }
   const res = await fetch(`${COURSES_BASE}/courses/organisers.json`);
@@ -767,9 +779,11 @@ async function getOrganiserIds(env: Env): Promise<Set<string>> {
   try {
     const arr = (await res.json()) as unknown;
     const ids = Array.isArray(arr) ? arr.map((x) => String(x)) : [];
-    await env.ROWING_COURSES.put(ORGANISERS_CACHE_KEY, JSON.stringify(ids), {
-      expirationTtl: ORGANISERS_CACHE_TTL,
-    });
+    if (env.ROWING_COURSES) {
+      await env.ROWING_COURSES.put(ORGANISERS_CACHE_KEY, JSON.stringify(ids), {
+        expirationTtl: ORGANISERS_CACHE_TTL,
+      });
+    }
     return new Set(ids);
   } catch {
     return new Set();
@@ -920,7 +934,7 @@ async function verifyBearerTokenCached(bearerToken: string, env: Env): Promise<s
   const hashPrefix = hashHex.slice(0, 16);
   
   const cacheKey = `bearer-token:sha256:${hashPrefix}`;
-  const cached = await env.ROWING_COURSES.get(cacheKey);
+  const cached = env.ROWING_COURSES ? await env.ROWING_COURSES.get(cacheKey) : null;
   
   if (cached) {
     console.log(`[verifyBearerTokenCached] Cache hit for token prefix ${bearerToken.slice(0, 8)}...`);
@@ -930,7 +944,7 @@ async function verifyBearerTokenCached(bearerToken: string, env: Env): Promise<s
   console.log(`[verifyBearerTokenCached] Cache miss for token prefix ${bearerToken.slice(0, 8)}..., validating with intervals.icu`);
   const result = await verifyIntervalsToken(bearerToken);
   
-  if (result.athleteId) {
+  if (result.athleteId && env.ROWING_COURSES) {
     // Cache for 1 hour (3600 seconds)
     await env.ROWING_COURSES.put(cacheKey, result.athleteId, {
       expirationTtl: 3600,
@@ -1235,9 +1249,11 @@ async function handleImportZip(request: Request, env: Env, athleteId: string): P
   }
 
   const kvKey = `liked:${athleteId}`;
-  const currentLiked: string[] = JSON.parse((await env.ROWING_COURSES.get(kvKey)) ?? '[]');
+  const currentLiked: string[] = env.ROWING_COURSES ? JSON.parse((await env.ROWING_COURSES.get(kvKey)) ?? '[]') : [];
   const updatedLiked = [...new Set([...currentLiked, ...likedIds])];
-  await env.ROWING_COURSES.put(kvKey, JSON.stringify(updatedLiked));
+  if (env.ROWING_COURSES) {
+    await env.ROWING_COURSES.put(kvKey, JSON.stringify(updatedLiked));
+  }
 
   return jsonResponse(
     {
@@ -1766,13 +1782,15 @@ const COURSE_INDEX_CACHE_KEY = 'course-index:json';
 const COURSE_INDEX_CACHE_TTL = 300;
 
 async function getRemovedChallengeIds(env: Env): Promise<Set<string>> {
-  const cached = await env.ROWING_COURSES.get(REMOVED_CHALLENGES_CACHE_KEY);
-  if (cached) {
-    try {
-      const arr = JSON.parse(cached) as unknown;
-      return new Set(Array.isArray(arr) ? arr.map(String) : []);
-    } catch {
-      // fall through
+  if (env.ROWING_COURSES) {
+    const cached = await env.ROWING_COURSES.get(REMOVED_CHALLENGES_CACHE_KEY);
+    if (cached) {
+      try {
+        const arr = JSON.parse(cached) as unknown;
+        return new Set(Array.isArray(arr) ? arr.map(String) : []);
+      } catch {
+        // fall through
+      }
     }
   }
   const res = await fetch(`${COURSES_BASE}/courses/removed-challenges.json`);
@@ -1785,23 +1803,27 @@ async function getRemovedChallengeIds(env: Env): Promise<Set<string>> {
       if (item && typeof item === 'object' && 'id' in item) return String(item.id);
       return String(item);
     });
-    await env.ROWING_COURSES.put(REMOVED_CHALLENGES_CACHE_KEY, JSON.stringify(ids), {
-      expirationTtl: REMOVED_CHALLENGES_CACHE_TTL,
-    });
+    if (env.ROWING_COURSES) {
+      await env.ROWING_COURSES.put(REMOVED_CHALLENGES_CACHE_KEY, JSON.stringify(ids), {
+        expirationTtl: REMOVED_CHALLENGES_CACHE_TTL,
+      });
+    }
     return new Set(ids);
   } catch {
     return new Set();
   }
 }
 
-async function getCourseIndex(env: Env): Promise<Array<{ id: string; name?: string }>> {
-  const cached = await env.ROWING_COURSES.get(COURSE_INDEX_CACHE_KEY);
-  if (cached) {
-    try {
-      const arr = JSON.parse(cached) as unknown;
-      return Array.isArray(arr) ? arr : [];
-    } catch {
-      // fall through
+async function getCourseIndex(env: Env): Promise<Array<{ id: string; name?: string; center_lat?: number; center_lon?: number; distance_m?: number }>> {
+  if (env.ROWING_COURSES) {
+    const cached = await env.ROWING_COURSES.get(COURSE_INDEX_CACHE_KEY);
+    if (cached) {
+      try {
+        const arr = JSON.parse(cached) as unknown;
+        return Array.isArray(arr) ? arr : [];
+      } catch {
+        // fall through
+      }
     }
   }
   const res = await fetch(`${COURSES_BASE}/courses/index.json`);
@@ -1809,9 +1831,11 @@ async function getCourseIndex(env: Env): Promise<Array<{ id: string; name?: stri
   try {
     const arr = (await res.json()) as unknown;
     const courses = Array.isArray(arr) ? arr : [];
-    await env.ROWING_COURSES.put(COURSE_INDEX_CACHE_KEY, JSON.stringify(courses), {
-      expirationTtl: COURSE_INDEX_CACHE_TTL,
-    });
+    if (env.ROWING_COURSES) {
+      await env.ROWING_COURSES.put(COURSE_INDEX_CACHE_KEY, JSON.stringify(courses), {
+        expirationTtl: COURSE_INDEX_CACHE_TTL,
+      });
+    }
     return courses;
   } catch {
     return [];
@@ -2509,9 +2533,11 @@ async function addToRemovedChallenges(
     }
 
     const updatedIds = existingData.map((x) => x.id);
-    await env.ROWING_COURSES.put(REMOVED_CHALLENGES_CACHE_KEY, JSON.stringify(updatedIds), {
-      expirationTtl: REMOVED_CHALLENGES_CACHE_TTL,
-    });
+    if (env.ROWING_COURSES) {
+      await env.ROWING_COURSES.put(REMOVED_CHALLENGES_CACHE_KEY, JSON.stringify(updatedIds), {
+        expirationTtl: REMOVED_CHALLENGES_CACHE_TTL,
+      });
+    }
 
     return issue.html_url;
   } catch (e) {
