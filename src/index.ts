@@ -1632,7 +1632,8 @@ async function handleCalculateTime(
     timeS: result.timeS,
     distanceM: result.distanceM,
     validationNote: result.validationNote,
-    latlng: latlngForMap,
+    latlng: result.gateDiagnostics?.reason === 'no_gates' ? [] : result.valid ? latlngForMap : latlng.slice(0, len),
+    ...(result.gateDiagnostics && { gateDiagnostics: result.gateDiagnostics }),
   };
   if (debugMode) {
     const tMin = len > 0 ? Math.min(...time.slice(0, len)) : 0;

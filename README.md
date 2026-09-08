@@ -170,3 +170,15 @@ From the **courses** repo, run `npm run dev` for the static site, then open the 
 ## Contributing
 
 We welcome contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to propose changes, run tests, and open pull requests.
+
+
+Course calculation failures include `gateDiagnostics` with `reason` (`no_gates`,
+`missed_gates`, or `gate_order`) and the course's `gates`, each containing its
+polygon and a `passed` flag. Flags use the timing algorithm's crossing rules
+(exit for start/intermediate gates, entry for finish). `gate_order` means every
+gate was crossed individually but no complete ordered passage was found.
+For `no_gates`, the client displays a plain message and no diagnostic map.
+Other failures include the full original GPS coordinates in `latlng` so display
+simplification does not obscure narrow gate crossings. Successful responses
+retain the existing map downsampling. The map dialog requires the companion
+`courses` frontend update; `validationNote` remains available for debugging.
