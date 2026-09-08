@@ -108,6 +108,38 @@ describe('calculateCourseTime', () => {
     expect(r.valid).toBe(false);
   });
 
+  it('reports no gates for a distant session', () => {
+    const result = calculateCourseTime(course, [
+      { lat: 10, lon: 10, time: 0 }, { lat: 11, lon: 10, time: 10 },
+    ], haversine);
+    expect(result.gateDiagnostics?.reason).toBe('no_gates');
+    expect(result.gateDiagnostics?.gates.map(g => g.passed)).toEqual([false, false]);
+  });
+
+  it('reports a missing start even when the finish is crossed', () => {
+    const result = calculateCourseTime(course, [
+      { lat: 1.5, lon: 0.3, time: 0 }, { lat: 3.5, lon: 0.3, time: 10 },
+    ], haversine);
+    expect(result.gateDiagnostics?.reason).toBe('missed_gates');
+    expect(result.gateDiagnostics?.gates.map(g => g.passed)).toEqual([false, true]);
+  });
+
+  it('reports a missed finish after crossing the start', () => {
+    const result = calculateCourseTime(course, [
+      { lat: 0.5, lon: 0.3, time: 0 }, { lat: 1.5, lon: 0.3, time: 10 },
+    ], haversine);
+    expect(result.gateDiagnostics?.gates.map(g => g.passed)).toEqual([true, false]);
+  });
+
+  it('distinguishes wrong order from missed gates', () => {
+    const result = calculateCourseTime(course, [
+      { lat: 3.5, lon: 0.3, time: 0 }, { lat: -0.5, lon: 0.3, time: 20 },
+    ], haversine);
+    expect(result.valid).toBe(false);
+    expect(result.gateDiagnostics?.reason).toBe('gate_order');
+    expect(result.gateDiagnostics?.gates.map(g => g.passed)).toEqual([true, true]);
+  });
+
   it('returns valid when track passes start and finish', () => {
     // Track: inside Start -> exit Start -> ... -> enter Finish -> exit Finish
     const track: TrackPoint[] = [

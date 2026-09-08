@@ -26,6 +26,10 @@ export interface CourseTimeResult {
   timeS: number;
   distanceM: number;
   validationNote: string;
+  gateDiagnostics?: {
+    reason: 'no_gates' | 'missed_gates' | 'gate_order';
+    gates: Array<CoursePolygon & { passed: boolean }>;
+  };
   startSecond?: number;
   endSecond?: number;
   _debug?: {
@@ -256,6 +260,25 @@ export function calculateCourseTime(
   const interpolated = interpolateTrack(track);
   const withDist = addCumulativeDistance(interpolated, haversineFn);
 
+  const invalidResult = (): CourseTimeResult => {
+    const gates = course.polygons.map((polygon, index) => {
+      let passed = false;
+      try {
+        timeInPath(interpolated, polygon, index === course.polygons.length - 1 ? 'min' : 'max');
+        passed = true;
+      } catch { /* No qualifying crossing. */ }
+      return { ...polygon, passed };
+    });
+    const passedCount = gates.filter((gate) => gate.passed).length;
+    return {
+      valid: false, timeS: 0, distanceM: 0, validationNote: note.join('\n'),
+      gateDiagnostics: {
+        reason: passedCount === 0 ? 'no_gates' : passedCount < gates.length ? 'missed_gates' : 'gate_order',
+        gates,
+      },
+    };
+  };
+
   let entryTimes: number[];
   try {
     const r = timeInPath(withDist, course.polygons[0], 'max', true);
@@ -263,7 +286,7 @@ export function calculateCourseTime(
     note.push(`Course id ${course.id}, Found ${entryTimes.length} exit times from start`);
   } catch {
     note.push(`Course id ${course.id}, Track does not pass through start gate`);
-    return { valid: false, timeS: 0, distanceM: 0, validationNote: note.join('\n') };
+    return invalidResult();
   }
 
   const records: Array<{ netTime: number; dist: number; completed: boolean; startS: number; endS: number }> = [];
@@ -296,7 +319,7 @@ export function calculateCourseTime(
 
   const completed = records.filter((r) => r.completed);
   if (completed.length === 0) {
-    return { valid: false, timeS: 0, distanceM: 0, validationNote: note.join('\n') };
+    return invalidResult();
   }
 
   const best = completed.reduce((a, b) => (a.netTime < b.netTime ? a : b));
