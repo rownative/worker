@@ -103,6 +103,50 @@ describe('submission consent and storage', () => {
     }
     expect((await env.DB!.prepare('SELECT COUNT(*) AS n FROM challenge_results').first())!.n).toBe(1);
   });
+
+  it('returns gate diagnostics and the GPS trace when a submitted result misses gates', async () => {
+    await challenge();
+    const session = fixture.sessions.find(s => s.file === '9-5-26-HOTD.fit')!;
+    vi.spyOn(intervals, 'fetchIntervalsActivity').mockResolvedValue({ id: 'activity', start_date_local: '2026-09-05T08:00:00' });
+    vi.spyOn(intervals, 'fetchIntervalsStreams').mockResolvedValue({ latlng: session.track.map(p => [p.lat, p.lon]), time: session.track.map(p => p.time) });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json(fixture.course));
+
+    const res = await request('challenges/challenge/submit', {
+      method: 'POST',
+      headers: { Cookie: await cookie(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ activityId: 'activity', displayName: 'Alice', boatType: '1x' }),
+    });
+    expect(res.status, await res.clone().text()).toBe(400);
+    const data = await res.json() as {
+      error?: string;
+      validationNote?: string;
+      latlng?: unknown[];
+      gateDiagnostics?: { reason?: string; gates?: Array<{ name: string; passed: boolean }> };
+    };
+    expect(data.error).toBe('Validation failed');
+    expect(data.gateDiagnostics?.reason).toBe('missed_gates');
+    expect(data.gateDiagnostics?.gates?.filter(gate => gate.passed)).toHaveLength(15);
+    expect(data.gateDiagnostics?.gates?.filter(gate => !gate.passed).map(gate => gate.name)).toEqual(['Finish']);
+    expect(data.latlng?.length).toBeGreaterThan(1);
+    expect(data.latlng?.length).toBeLessThanOrEqual(session.track.length);
+  });
+
+  it('returns no map trace when a submitted result is not near the course', async () => {
+    await challenge();
+    vi.spyOn(intervals, 'fetchIntervalsActivity').mockResolvedValue({ id: 'activity', start_date_local: '2026-09-05T08:00:00' });
+    vi.spyOn(intervals, 'fetchIntervalsStreams').mockResolvedValue({ latlng: [[0, 0], [0.1, 0.1]], time: [0, 1] });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json(fixture.course));
+
+    const res = await request('challenges/challenge/submit', {
+      method: 'POST',
+      headers: { Cookie: await cookie(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ activityId: 'activity', displayName: 'Alice', boatType: '1x' }),
+    });
+    expect(res.status).toBe(400);
+    const data = await res.json() as { latlng?: unknown[]; gateDiagnostics?: { reason?: string } };
+    expect(data.gateDiagnostics?.reason).toBe('no_gates');
+    expect(data.latlng).toEqual([]);
+  });
 });
 
 describe('challenge merges', () => {

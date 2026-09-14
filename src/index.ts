@@ -2753,6 +2753,8 @@ async function handleChallengeSubmit(
     return jsonResponse({
       error: 'Validation failed',
       validationNote: result.validationNote,
+      latlng: result.gateDiagnostics?.reason === 'no_gates' ? [] : latlng.slice(0, len),
+      ...(result.gateDiagnostics && { gateDiagnostics: result.gateDiagnostics }),
     }, 400, true);
   }
 
